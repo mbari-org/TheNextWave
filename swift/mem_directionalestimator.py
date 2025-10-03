@@ -94,8 +94,8 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
 
     if not convert:
         # leave distribution in cartesian (observed) form
-    	NE = E
-    	NS = Sn
+        NE = E
+        NS = Sn
 
     else:
         # convert to a geographic coordinate frame

@@ -9,8 +9,12 @@ def WFA_sim_grid():
 
     x0, y0, z_num, z_letter = utm.from_latlon(lat0, lon0)
 
-    x = x0 + np.arange(3, 51, 3).T * np.cos(np.radians(np.arange(0, 361, 5)))
-    y = y0 + np.arange(3, 51, 3).T * np.sin(np.radians(np.arange(0, 361, 5)))
+    a = np.arange(3, 51, 3)
+    cosb = np.cos(np.radians(np.arange(0, 361, 5)))
+    sinb = np.sin(np.radians(np.arange(0, 361, 5)))
+
+    x = x0 + np.outer(a, cosb)
+    y = y0 + np.outer(a, sinb)
 
     lat = []
     lon = []

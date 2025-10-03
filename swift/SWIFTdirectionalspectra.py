@@ -5,14 +5,14 @@ from typing import Tuple
 import numpy as np
 import numpy.typing as npt
 
-from mem_directionalestimator import MEM_directionalestimator
-from swift import SWIFTData
+from .mem_directionalestimator import MEM_directionalestimator
+from .swift import SWIFTData
 
 
 def SWIFTdirectionalspectra(
         SWIFT:  SWIFTData,
-        plotflag: bool = true,
-        recip: bool = false
+        plotflag: bool = False,
+        recip: bool = False
     ) -> Tuple[
         npt.NDArray[np.float64],  # Etheta
         npt.NDArray[np.float64],  # theta
@@ -47,42 +47,55 @@ def SWIFTdirectionalspectra(
     wd = Path.cwd().name  # get current folder name without path
 
     # Average the spectra in the input SWIFT structure (if more than one).
-    SWIFT = np.atleast_1d(SWIFT)
-    f = SWIFT[0].wavespectra.freq
-    df = np.median(np.diff(f))
-    E = np.zeros_like(f)
-    a1 = zeros_like(f)
-    a2 = zeros_like(f)
-    b1 = zeros_like(f)
-    b2 = zeros_like(f)
-    counter = 0
+    f = SWIFT.wavespectra.freq.reshape((-1, 1), order='F')
+    df = np.median(np.diff(f, axis=0))
+    energy = SWIFT.wavespectra.energy.copy()
+    a1 = SWIFT.wavespectra.a1.copy()
+    a2 = SWIFT.wavespectra.a2.copy()
+    b1 = SWIFT.wavespectra.b1.copy()
+    b2 = SWIFT.wavespectra.b2.copy()
+    Hs = SWIFT.significant_wave_height.copy()
 
-    for ai in range(len(SWIFT)):
-        SWIFT[ai].wavespectra.energy[(SWIFT[ai].wavespectra.energy==9999) | np.isnan(SWIFT[ai].wavespectra.energy) ] = 0.
-        SWIFT[ai].wavespectra.a1[(SWIFT[ai].wavespectra.a1==9999) | np.isnan(SWIFT[ai].wavespectra.a1)] = 0.
-        SWIFT[ai].wavespectra.a2[(SWIFT[ai].wavespectra.a2==9999) | np.isnan(SWIFT[ai].wavespectra.a2)] = 0.
-        SWIFT[ai].wavespectra.b1[(SWIFT[ai].wavespectra.b1==9999) | np.isnan(SWIFT[ai].wavespectra.b1)] = 0.
-        SWIFT[ai].wavespectra.b2[(SWIFT[ai].wavespectra.b2==9999) | np.isnan(SWIFT[ai].wavespectra.b2)] = 0.
+    # clean data
+    for arr in [energy, a1, a2, b1, b2]:
+        arr[(arr == 9999) | np.isnan(arr)] = 0.0
 
-        if (SWIFT[ai].sigwaveheight > 0.) and (SWIFT[ai].sigwaveheight < 20.) and np.all(~np.isnan(SWIFT[ai].wavespectra.a1)):
-            E += SWIFT[ai].wavespectra.energy
-            a1 += SWIFT[ai].wavespectra.a1 * SWIFT[ai].wavespectra.energy
-            a2 += SWIFT[ai].wavespectra.a2 * SWIFT[ai].wavespectra.energy
-            b1 += SWIFT[ai].wavespectra.b1 * SWIFT[ai].wavespectra.energy
-            b2 += SWIFT[ai].wavespectra.b2 * SWIFT[ai].wavespectra.energy
-            counter += 1
+    # mask on time samples
+    good_mask = (
+        (Hs > 0.0) &
+        (Hs < 20.0) &
+        np.all(~np.isnan(a1), axis=1)
+    )
 
-    I = np.where((E > 0.) & (~np.isnan(E)))[0]
+    # keep good data
+    energy = energy[good_mask, :]
+    a1     = a1[good_mask, :]
+    a2     = a2[good_mask, :]
+    b1     = b1[good_mask, :]
+    b2     = b2[good_mask, :]
+    counter = energy.shape[0]
+
+    # Weighted sums across time axis
+    E = np.sum(energy, axis=0)
+    a1 = np.sum(a1 * energy, axis=0)
+    a2 = np.sum(a2 * energy, axis=0)
+    b1 = np.sum(b1 * energy, axis=0)
+    b2 = np.sum(b2 * energy, axis=0)
+
+    # Normalize
     E /= counter
-    a1[I] /= E[I] * counter
-    b1[I] /= E[I] * counter
-    a2[I] /= E[I] * counter
-    b2[I] /= E[I] * counter
-    Hs = 4. * np.sqrt(np.sum(E(I).*df))
+    mask = (E > 0.0) & (~np.isnan(E))
+    a1[mask] /= E[mask] * counter
+    a2[mask] /= E[mask] * counter
+    b1[mask] /= E[mask] * counter
+    b2[mask] /= E[mask] * counter
+
+    # recompute sig wave height
+    Hs = 4.0 * np.sqrt(np.sum(E[mask] * df))
 
     # calc MEM estimate of full dir distribution spectrum, then convert to nautical convention
     # (compass dir FROM)
-    Ethetanorm, Etheta = MEM_directionalestimator(a1, a2, b1, b2, E, false)
+    Ethetanorm, Etheta = MEM_directionalestimator(a1, a2, b1, b2, E, False)
     dtheta = 2.
     # start with cartesion (a1 is positive east velocities, b1 is positive north)
     theta = -np.arange(-180., 180., dtheta)
@@ -99,7 +112,7 @@ def SWIFTdirectionalspectra(
         theta[eastdirs] = theta[eastdirs] + 180.  # take reciprocal such wave direction is FROM, not TOWARDS
 
     dsort = np.argsort(theta)
-    theta = theta[dsort]
+    theta = theta[dsort].reshape((-1, 1), order='F')
     Etheta = Etheta[:, dsort]
 
     # spectral directions and spread, converted to nautical convention
