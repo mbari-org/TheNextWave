@@ -1,14 +1,19 @@
-from dataclasses import dataclass, field, asdict, fields
+from dataclasses import dataclass, field, asdict, fields, is_dataclass
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import numpy as np
 import numpy.typing as npt
-
+import pandas as pd
+import scipy.io as spio
 import xarray as xr
 
 
 def empty_float64():
     return np.array([], dtype=np.float64)
+
+def empty_int():
+    return np.array([], dtype=int)
 
 
 @dataclass
@@ -233,194 +238,176 @@ class Uplooking:
 
 @dataclass
 class SWIFTData:
-    # TODO need to understand time units of the sample data I have
-    # e.g.
-    #    <xarray.DataArray 'time' (time: 549)> Size: 4kB
-    #    array([19243.458333, 19243.5     , 19243.541667, ..., 19269.25    ,
-    #           19269.291667, 19269.333333])
-    # Coordinates:
-    #  * time     (time) float64 4kB 1.924e+04 1.924e+04 ... 1.927e+04 1.927e+04
-    time: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "days (MATLAB datenum)",
-        "desc": "MATLAB datenum time"
+    name: Optional[str] = ''
+
+    rawtime: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "unix timestamp converted ffrom MATLAB datenum",
+        "desc": "unix timestamp"
     })
 
-    trajectory: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "TODO",
-        "desc": "TODO"
+    u: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "meters per second",
+        "desc": "eastings velocity"
     })
-
-    sbg_x: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+    v: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "meters per second",
+        "desc": "northings velocity"
+    })
+    x: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
         "units": "meters",
         "desc": "TODO"
     })
-    sbg_y: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+    y: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
         "units": "meters",
         "desc": "TODO"
     })
-    utmzone: Optional[int] = field(default=None, metadata={
-        "units": "-",
-        "desc": "UTM Zone"
-    })
-
-    air_pressure: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "mb",
-        "desc": "air pressure 1 m above the wave-following surface measured by MET sensor"
-    })
-    air_pressure_stddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "mb",
-        "desc": "standard deviation of air pressure"
-    })
-
-    air_temperature: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "air temperature 1 m above the wave-following surface measured by MET sensor"
-    })
-    air_temperature_stddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "standard deviation of air temperature"
-    })
-
-    drift_direction: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "true drift direction TOWARDS (equivalent to 'course over ground')"
-    })
-    driftdirTstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "stddev true drift direction TOWARDS (equivalent to 'course over ground')"
-    })
-    drift_speed: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m/s",
-        "desc": "drift speed in m/s (equivalent to 'speed over ground')"
-    })
-    driftspdstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m/s",
-        "desc": "stddev drift speed in m/s (equivalent to 'speed over ground')"
-    })
-
-    lat: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg",
-        "desc": "latitude"
-    })
-    lon: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg",
-        "desc": "longitude"
-    })
-
-    metheight: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m",
-        "desc": "height of the MET sensor"
-    })
-
-    peak_wave_direction: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "wave direction (from North)"
-    })
-    peak_wave_period: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "s",
-        "desc": "period corresponding to peak in wave energy spectrum"
-    })
-
-    significant_wave_height: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m",
-        "desc": "significant wave height estimated from wave energy spectrum"
+    z: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "meters",
+        "desc": "heave"
     })
 
     wavespectra: WaveSpectra = field(default_factory=WaveSpectra, metadata={
         "desc": "structure containing IMU spectral wave data"
     })
 
-    winddirR: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "relative wind direction (from North)"
-    })
-    winddirRstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "standard deviation of relative wind direction"
-    })
-    wind_direction: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "true wind direction (from North)"
-    })
-    wind_direction_stddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "degrees",
-        "desc": "standard deviation of true wind direction"
-    })
-    wind_speed: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m/s",
-        "desc": "wind speed 1 m above the wave-following surface measured by MET sensor"
-    })
-    wind_speed_stddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m/s",
-        "desc": "standard deviation of wind speed"
+    CTdepth: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
     })
 
-    sigwaveheight_alt: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "m",
-        "desc": "significant wave height estimated from wave energy spectrum"
-    })
-
-    peakwaveperiod_alt: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "s",
-        "desc": "period corresponding to peak in wave energy spectrum"
-    })
-
-    sea_water_temperature: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "water temperature 0.5 m below the surface, measured by CT"
-    })
-
-    sea_water_salinity: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "PSU",
-        "desc": "water salinity 0.5 m below the surface, measured by CT"
-    })
-
-    ID: Optional[int] = field(default=None, metadata={
+    ID: npt.NDArray[int] = field(default=empty_float64, metadata={
         "units": "-",
         "desc": "SWIFT ID"
     })
 
-    ### TODO the rest of these are not in the sample data I have
-    relhumidity: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "%",
-        "desc": "relative humidity 1 m above the wave-following surface measured by MET sensor"
-    })
-    relhumiditystddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "%",
-        "desc": "standard deviation of relative humidity"
-    })
-    radiancemean: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "mV",
-        "desc": "radiance measured by radiometer"
-    })
-    radiancestd: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "mV",
-        "desc": "standard deviation of radiance"
-    })
-    infraredtemp: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "(uncalibrated) target temperature inferred from radiance; should be close to true skin temperature"
-    })
-    infraredtempstd: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "standard deviation of target temperature"
-    })
-    ambienttemp: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "ambient temperature measured by radiometer"
-    })
-    ambienttempstd: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "standard deviation of ambient temperature"
+    airpres: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
     })
 
-    watertempstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "deg C",
-        "desc": "standard deviation of water temperature"
+    airpresstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
     })
-    salinitystddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "PSU",
-        "desc": "standard deviation of water salinity"
+
+    airtemp: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    airtempstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    date: Optional[str] = field(default=None, metadata={
+        "units": "-",
+        "desc": "string giving burst date in format 'ddmmyyyy'"
+    })
+
+    driftdirT: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    driftdirTstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    driftspd: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    driftspdstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    lat: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    lon: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    metheight: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    peakwavedirT: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    peakwaveperiod: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    salinity: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    sigwaveheight: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    time: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    watertemp: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    winddirR: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    winddirRstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    winddirT: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    winddirTstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    windspd: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    windspdstddev: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    sigwaveheight_alt: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
+    })
+
+    peakwaveperiod_alt: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "TODO",
+        "desc": "TODO"
     })
 
     signature: Signature = field(default_factory=Signature, metadata={
@@ -430,26 +417,54 @@ class SWIFTData:
         "desc": "structure containing Nortek Aquadopp HR ADCP data (uplooking configuration)"
     })
 
-    date: Optional[str] = field(default=None, metadata={
-        "units": "-",
-        "desc": "string giving burst date in format 'ddmmyyyy'"
-    })
-    sbdfile: Optional[str] = field(default=None, metadata={
-        "units": "-",
-        "desc": "short-burst data file"
-    })
-    burstID: Optional[str] = field(default=None, metadata={
-        "units": "-",
-        "desc": "burstID named by burst timestamp, consistent with raw sensor burst files"
-    })
-    battery: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
-        "units": "V",
-        "desc": "battery voltage"
-    })
-    CTdepth: npt.NDArray[np.float64] = field(default=None, metadata={
-        "units": "m",
-        "desc": "depth of the CT sensor"
-    })
+    @classmethod
+    def from_mat(cls, matfile, name):
+        print(f'loading {matfile} ...')
+        mat = spio.loadmat(matfile)
+        swiftmat = mat['SWIFT']
+        swiftdtype = swiftmat.dtype
+        swiftdata = {n: np.vstack(swiftmat[n][0]) for n in swiftdtype.names if 'wavespectra' not in n}
+        swiftwsmat = swiftmat['wavespectra'][0]
+        swiftwsdtype = swiftwsmat[0].dtype
+        swiftwsdata = {n: np.hstack([ws[n][0, 0] for ws in swiftwsmat]).T for n in swiftwsdtype.names if 'check' not in n and 'freq' not in n}
+        swiftwsdata.update({'check': np.vstack([ws['check'][0, 0] for ws in swiftwsmat])})
+        swiftdata.update(**swiftwsdata)
+        freq = swiftwsmat[0][0]['freq'][0]
+        swiftcolumns = [n for n, v in swiftdata.items() if v.size > 1]
+        #swiftattrs = [n for n, v in swiftdata.items() if v.size == 1]
+
+        data_vars={
+            'u': (('time', 'raw_idx'), swiftdata['u']),
+            'v': (('time', 'raw_idx'), swiftdata['v']),
+            'x': (('time', 'raw_idx'), swiftdata['x'].astype(np.float64)),
+            'y': (('time', 'raw_idx'), swiftdata['y'].astype(np.float64)),
+            'z': (('time', 'raw_idx'), swiftdata['z']),
+            'energy': (('time', 'freq'), swiftdata['energy']),
+            'a1': (('time', 'freq'), swiftdata['a1']),
+            'b1': (('time', 'freq'), swiftdata['b1']),
+            'a2': (('time', 'freq'), swiftdata['a2']),
+            'b2': (('time', 'freq'), swiftdata['b2']),
+            'energy_alt': (('time', 'freq'), swiftdata['energy_alt']),
+            'check': (('time', 'check_idx'), swiftdata['check']),
+        }
+        data_vars.update({n: (('time',), swiftdata[n].ravel(order='F')) for n in swiftcolumns \
+            if n not in ['time','rawtime','freq','u','v','x','y','z', 'signature',  # TODO signature has types 'HRprofile','profile',
+                         'energy','a1','b1','a2','b2','energy_alt','check']})
+
+        ds = xr.Dataset(
+            data_vars=dict(**data_vars),
+            coords={
+                'rawtime': (('time', 'raw_idx'), pd.to_datetime(swiftdata['rawtime'] - 719529, unit='D').to_numpy()),
+                'time': pd.to_datetime(swiftdata['time'].ravel(order='F') - 719529, unit='D').to_numpy(),
+                'freq': freq.ravel(order='F'),
+            },
+            attrs={'name': name}
+        )
+
+        pth = Path(matfile)
+        ds.to_netcdf(str(Path.joinpath(*[Path(p) for p in list(pth.parts[:-1]) + [pth.stem+'.nc']])))
+
+        return cls.from_dataset(ds)
 
     @classmethod
     def from_dataset(cls, ds: xr.Dataset = None):
@@ -457,64 +472,45 @@ class SWIFTData:
         if not ds:
             return cls()
         return cls(
-            time=np.array(ds.coords.get("time", empty_float64())),
-            trajectory=np.array(ds.data_vars.get("trajectory", empty_float64())),
-            sbg_x=np.array(ds.data_vars.get("sbg_x", empty_float64())),
-            sbg_y=np.array(ds.data_vars.get("sbg_y", empty_float64())),
-            utmzone=int(utmzone) if (utmzone:=ds.data_vars.get("utmzone", None)) else None,
-            air_pressure=np.array(ds.data_vars.get("air_pressure", empty_float64())),
-            air_pressure_stddev=np.array(ds.data_vars.get("air_pressure_stddev", empty_float64())),
-            drift_direction=np.array(ds.data_vars.get("drift_direction", empty_float64())),
-            driftdirTstddev=np.array(ds.data_vars.get("driftdirTstddev", empty_float64())),
-            drift_speed=np.array(ds.data_vars.get("drift_speed", empty_float64())),
-            driftspdstddev=np.array(ds.data_vars.get("driftspdstddev", empty_float64())),
-            lat=np.array(ds.data_vars.get("lat", empty_float64())),
-            lon=np.array(ds.data_vars.get("lon", empty_float64())),
-            metheight=np.array(ds.data_vars.get("metheight", empty_float64())),
-            peak_wave_direction=np.array(ds.data_vars.get("peak_wave_direction", empty_float64())),
-            peak_wave_period=np.array(ds.data_vars.get("peak_wave_period", empty_float64())),
-            significant_wave_height=np.array(ds.data_vars.get("significant_wave_height", empty_float64())),
+            time=np.array(ds.coords.get('time', empty_float64())),
+            rawtime=np.array(ds.coords.get('rawtime', empty_float64())),
+            u=np.array(ds.data_vars.get('u', empty_float64())),
+            v=np.array(ds.data_vars.get('v', empty_float64())),
+            x=np.array(ds.data_vars.get('x', empty_float64())),
+            y=np.array(ds.data_vars.get('y', empty_float64())),
+            z=np.array(ds.data_vars.get('z', empty_float64())),
             wavespectra=WaveSpectra.from_dataset(ds),
-            #wavespectra.freq
-            #wavespectra.energy
-            #wavespectra.a1
-            #wavespectra.b1
-            #wavespectra.a2
-            #wavespectra.b2
-            #wavespectra.check
-            #wavespectra.energy_alt
-            winddirR=np.array(ds.data_vars.get("winddirR", empty_float64())),
-            winddirRstddev=np.array(ds.data_vars.get("winddirRstddev", empty_float64())),
-            wind_direction=np.array(ds.data_vars.get("wind_direction", empty_float64())),
-            wind_direction_stddev=np.array(ds.data_vars.get("wind_direction_stddev", empty_float64())),
-            wind_speed=np.array(ds.data_vars.get("wind_speed", empty_float64())),
-            wind_speed_stddev=np.array(ds.data_vars.get("wind_speed_stddev", empty_float64())),
-            sigwaveheight_alt=np.array(ds.data_vars.get("sigwaveheight_alt", empty_float64())),
-            peakwaveperiod_alt=np.array(ds.data_vars.get("peakwaveperiod_alt", empty_float64())),
-            sea_water_salinity=np.array(ds.data_vars.get("sea_water_salinity", empty_float64())),
-            sea_water_temperature=np.array(ds.data_vars.get("sea_water_temperature", empty_float64())),
-            ID=int(id) if (id:=ds.attrs.get("id", None)) else None,
-            ### TODO the rest of these fields aren't in sample data
-            air_temperature=np.array(ds.data_vars.get("airtemp", empty_float64())),
-            air_temperature_stddev=np.array(ds.data_vars.get("airtempstddev", empty_float64())),
-            relhumidity=np.array(ds.data_vars.get("relhumidity", empty_float64())),
-            relhumiditystddev=np.array(ds.data_vars.get("relhumiditystddev", empty_float64())),
-            radiancemean=np.array(ds.data_vars.get("radiancemean", empty_float64())),
-            radiancestd=np.array(ds.data_vars.get("radiancestd", empty_float64())),
-            infraredtemp=np.array(ds.data_vars.get("infraredtemp", empty_float64())),
-            infraredtempstd=np.array(ds.data_vars.get("infraredtempstd", empty_float64())),
-            ambienttemp=np.array(ds.data_vars.get("ambienttemp", empty_float64())),
-            ambienttempstd=np.array(ds.data_vars.get("ambienttempstd", empty_float64())),
-            watertempstddev=np.array(ds.data_vars.get("watertempstddev", empty_float64())),
-            salinitystddev=np.array(ds.data_vars.get("salinitystddev", empty_float64())),
-            signature=Signature.from_dataset(ds),
+            CTdepth=np.array(ds.data_vars.get('CTdepth', empty_float64())),
+            ID=np.array(swiftid).astype(int) if (swiftid:=ds.data_vars.get('ID', empty_int())).size>0 else empty_int(),
+            airpres=np.array(ds.data_vars.get('airpres', empty_float64())),
+            airpresstddev=np.array(ds.data_vars.get('aipresstdev', empty_float64())),
+            airtemp=np.array(ds.data_vars.get('airtemp', empty_float64())),
+            airtempstddev=np.array(ds.data_vars.get('airtempstddev', empty_float64())),
+            date=np.array(ds.data_vars.get('date', empty_float64())),
+            driftdirT=np.array(ds.data_vars.get('driftdirT', empty_float64())),
+            driftdirTstddev=np.array(ds.data_vars.get('driftdirTstddev', empty_float64())),
+            driftspd=np.array(ds.data_vars.get('driftspd', empty_float64())),
+            driftspdstddev=np.array(ds.data_vars.get('driftspdstddev', empty_float64())),
+            lat=np.array(ds.data_vars.get('lat', empty_float64())),
+            lon=np.array(ds.data_vars.get('lon', empty_float64())),
+            metheight=np.array(ds.data_vars.get('metheight', empty_float64())),
+            peakwavedirT=np.array(ds.data_vars.get('peakwavedirT', empty_float64())),
+            peakwaveperiod=np.array(ds.data_vars.get('peakwaveperiod', empty_float64())),
+            salinity=np.array(ds.data_vars.get('salinity', empty_float64())),
+            sigwaveheight=np.array(ds.data_vars.get('sigwaveheight', empty_float64())),
+            watertemp=np.array(ds.data_vars.get('watertemp', empty_float64())),
+            winddirR=np.array(ds.data_vars.get('winddirR', empty_float64())),
+            winddirRstddev=np.array(ds.data_vars.get('winddirRstddev', empty_float64())),
+            winddirT=np.array(ds.data_vars.get('winddirT', empty_float64())),
+            winddirTstddev=np.array(ds.data_vars.get('winddirTstddev', empty_float64())),
+            windspd=np.array(ds.data_vars.get('windspd', empty_float64())),
+            windspdstddev=np.array(ds.data_vars.get('windspdstddev', empty_float64())),
+            sigwaveheight_alt=np.array(ds.data_vars.get('sigwaveheight_alt', empty_float64())),
+            peakwaveperiod_alt=np.array(ds.data_vars.get('peakwaveperiod_alt', empty_float64())),
+            signature=Signature.from_dataset(ds),  # TODO fix this in the from_mat func
             uplooking=Uplooking.from_dataset(ds),
-            date=np.array(ds.data_vars.get("date", empty_float64())),
-            sbdfile=np.array(ds.data_vars.get("sbdfile", empty_float64())),
-            burstID=np.array(ds.data_vars.get("burstID", empty_float64())),
-            battery=np.array(ds.data_vars.get("battery", empty_float64())),
-            CTdepth=np.array(ds.data_vars.get("CTdepth", empty_float64())),
         )
+
 
 @dataclass
 class SWIFTArray:
@@ -523,61 +519,610 @@ class SWIFTArray:
     swift24: SWIFTData = field(default_factory=SWIFTData)
     swift25: SWIFTData = field(default_factory=SWIFTData)
 
+    def bursts(self) -> "SWIFTArray":
+        idx = 0
+        try:
+            while True:
+                yield self.burst(idx)
+                idx += 1
+        except IndexError as err:
+            # print(err)
+            pass
+
+
+    def burst(self, idx: int) -> "SWIFTArray":
+        """
+        Return a new SWIFTArray containing only the burst at index `idx` (0-based).
+        - Uses `time` to infer burst count.
+        - For 1D numpy arrays: returns the single scalar value at index idx.
+        - For 2D+ numpy arrays: selects the slice at index idx along axis 0.
+        - Recurses into nested dataclasses.
+        """
+        def _select_value(val, i):
+            # nested dataclass -> recurse
+            if is_dataclass(val):
+                kwargs = {}
+                for f in fields(type(val)):
+                    v = getattr(val, f.name)
+                    if 'freq' in f.name:
+                        kwargs[f.name] = v.copy()
+                        continue
+                    kwargs[f.name] = _select_value(v, i)
+                return type(val)(**kwargs)
+
+            # numpy arrays
+            if isinstance(val, np.ndarray):
+                if val.size == 0:
+                    return val.copy()
+                if val.ndim == 0:
+                    return val.copy()  # scalar array
+                # 1D -> return a single value (numpy scalar)
+                if val.ndim == 1:
+                    return val[int(i)].copy()
+                # 2D or higher -> select along first axis and return remaining dims
+                return val[int(i)].copy()
+
+            # lists/tuples: try indexing
+            if isinstance(val, (list, tuple)):
+                try:
+                    return val[int(i)]
+                except Exception:
+                    return val
+
+            # scalars/None/other -> return as-is
+            return val
+
+        def _single_swift(sw: "SWIFTData", i: int) -> "SWIFTData":
+            kwargs = {}
+            for f in fields(SWIFTData):
+                v = getattr(sw, f.name)
+                kwargs[f.name] = _select_value(v, i)
+            return SWIFTData(**kwargs)
+
+        # infer bursts from `time`
+        ref = getattr(self.swift22, "time", None)
+        if isinstance(ref, np.ndarray) and ref.size > 0:
+            n_bursts = int(ref.shape[0])
+            if not (-n_bursts <= idx < n_bursts):
+                raise IndexError(f"idx {idx} out of bounds for bursts (len={n_bursts})")
+
+        s22 = _single_swift(self.swift22, idx)
+        s23 = _single_swift(self.swift23, idx)
+        s24 = _single_swift(self.swift24, idx)
+        s25 = _single_swift(self.swift25, idx)
+
+        return SWIFTArray(swift22=s22, swift23=s23, swift24=s24, swift25=s25)
+
 
 @dataclass
 class LSQWavePropParams:
-    A: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    Etheta: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    f: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    theta: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    kx: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    ky: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    omega: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    use_vel: bool = False
+    """
+    Solver output parameters for the least–squares wave–propagation model.
+
+    Shapes:
+        - A: (N,), wave amplitude solution vector (concatenated cosine/sine components)
+        - Etheta: (Nθ, Nf), directional spectrum reconstructed from solution
+        - f: (Nf,), frequency grid [Hz]
+        - theta: (Nθ,), direction grid [degrees]
+        - kx, ky: (N,), Cartesian wavenumber components [rad/m]
+        - omega: (N,), angular frequencies [rad/s]
+
+    Purpose:
+        Stores all per–target diagnostic outputs needed for spectrum
+        reconstruction and physics-quality verification.
+    """
+    A: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "m",
+            "description": "Wave amplitudes (cosine and sine components concatenated). "
+                           "Length = 2000 = 25 directions × 40 frequencies × 2."
+        },
+    )
+    Etheta: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "m^2/Hz/deg",
+            "description": "Directional wave energy spectrum. "
+                           "Dimensions: direction (25) × frequency (40)."
+        },
+    )
+    f: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "Hz",
+            "description": "Logarithmically spaced frequency components (40 elements)."
+        },
+    )
+    theta: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "deg (nautical)",
+            "description": "Directional components (25 elements)."
+        },
+    )
+    kx: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "1/m",
+            "description": "x-component of wavenumber for each (direction×frequency) = 1000 components."
+        },
+    )
+    ky: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "1/m",
+            "description": "y-component of wavenumber for each (direction×frequency) = 1000 components."
+        },
+    )
+    omega: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            "units": "rad/s",
+            "description": "Angular frequency for each (direction×frequency) = 1000 components."
+        },
+    )
+    use_vel: bool = field(
+        default=False,
+        metadata={
+            "description": "True if velocities were included in inversion."
+        },
+    )
 
 
 @dataclass
 class Prediction:
     """
-    prediction-related data.
+    Container for all measurement, reconstruction, and prediction arrays
+    produced by the least–squares wave–propagation system.
 
-    Typical shapes (MATLAB equivalents):
-      - tp: (T,)            # prediction times (seconds since t0)
-      - tm: (M, K)          # measurement times (M samples, K instruments)
-      - zm, zc, um, vm, uc, vc: same shape as tm
-      - zp: (T, ...)        # predicted field; 1D, 2D or 3D depending on config
-      - up, vp: optional predicted u/v (same shape rules as zp)
-      - zt, ut, vt: (T,)    # truth/test arrays (sampled or per-target)
-      - params: (T,)        # solver parameters per prediction time (or per-target)
-      - comp_time: (T,)     # computation time per prediction
+    MATLAB–consistent shapes:
+        Measurement arrays (3 instruments × M samples):
+            zm, zc, um, vm, uc, vc, tm:  (M, K)  typically (348, 3)
+
+        Target-point arrays (one target × T times):
+            zt, ut, vt: (1, T)
+            tp: (T, 1)
+
+        Predictions:
+            zp: (T, 1)
+            up, vp: optional, same shape as zp
+
+        Solver parameters:
+            params: list of LSQWavePropParams (one per predicted time)
+            comp_time: (T,), computation time per prediction
+
+    Notes:
+        - All arrays are kept 2-D (MATLAB style).
+        - zp, up, vp are column vectors for each prediction time.
     """
 
-    tp: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    tm: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    tp: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "s", "description": "Prediction times (seconds since t0)"}
+    )
+    tm: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "s", "description": "Measurement times for each instrument"}
+    )
 
-    zm: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    zc: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    um: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    vm: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    uc: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    vc: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    zm: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m", "description": "Measured vertical displacement"}
+    )
+    zc: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m", "description": "Reconstructed vertical displacement at sensors"}
+    )
+    um: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Measured eastward velocity"}
+    )
+    vm: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Measured northward velocity"}
+    )
+    uc: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Reconstructed eastward velocity"}
+    )
+    vc: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Reconstructed northward velocity"}
+    )
 
-    zp: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    up: Optional[npt.NDArray[np.float64]] = None
-    vp: Optional[npt.NDArray[np.float64]] = None
+    zp: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m", "description": "Predicted surface elevation at target"}
+    )
+    up: Optional[npt.NDArray[np.float64]] = field(
+        default=None,
+        metadata={"units": "m/s", "description": "Predicted eastward velocity at target"}
+    )
+    vp: Optional[npt.NDArray[np.float64]] = field(
+        default=None,
+        metadata={"units": "m/s", "description": "Predicted northward velocity at target"}
+    )
 
-    zt: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    ut: npt.NDArray[np.float64] = field(default_factory=empty_float64)
-    vt: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    zt: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m", "description": "Ground truth elevation at target"}
+    )
+    ut: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Ground truth eastward velocity at target"}
+    )
+    vt: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "m/s", "description": "Ground truth northward velocity at target"}
+    )
 
-    params: List[LSQWavePropParams] = field(default_factory=list)
-    comp_time: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    params: List[LSQWavePropParams] = field(
+        default_factory=list,
+        metadata={"description": "Parameter set per prediction time"}
+    )
+    comp_time: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={"units": "s", "description": "Computation time for each prediction step"}
+    )
 
     # Optional metadata
-    Nlead: Optional[int] = None
-    Theta: Optional[float] = None
-    Cp: Optional[float] = None
+    Nlead: Optional[int] = field(
+        default=None, metadata={"description": "Wave lead time in samples"}
+    )
+    Theta: Optional[float] = field(
+        default=None, metadata={"units": "deg", "description": "Dominant wave direction"}
+    )
+    Cp: Optional[float] = field(
+        default=None, metadata={"units": "m/s", "description": "Phase speed"}
+    )
 
+    def to_netcdf(self, path: str) -> None:
+        """
+        Save Prediction to NetCDF.
+        """
+        def _force_1d(arr: np.ndarray) -> np.ndarray:
+            # If it is Nx1 or 1xN, flatten to (N,)
+            if arr.ndim == 2 and 1 in arr.shape:
+                return arr.flatten()
+            return arr
+
+        # Fix vector fields
+        self.tp = _force_1d(self.tp)
+        self.zt = _force_1d(self.zt)
+        self.ut = _force_1d(self.ut)
+        self.vt = _force_1d(self.vt)
+        self.zp = _force_1d(self.zp)
+        self.comp_time = _force_1d(self.comp_time)
+
+        # ---------------------------------------------------------
+        # 1. Valid prediction indices (skip uninitialized params)
+        # ---------------------------------------------------------
+        valid = np.array([p.A.size > 0 for p in self.params])
+        if not valid.any():
+            raise RuntimeError("No valid predictions to save.")
+
+        # prediction-time vectors (Np,)
+        tp = self.tp[valid]
+        zt = self.zt[valid] if self.zt.size else self.zt
+        ut = self.ut[valid] if self.ut.size else self.ut
+        vt = self.vt[valid] if self.vt.size else self.vt
+        comp_time = self.comp_time[valid]
+
+        # predicted at leave-one-out (Np,)
+        zp = self.zp[valid]
+
+        # ---------------------------------------------------------
+        # 2. Measurement arrays (M × K)
+        # ---------------------------------------------------------
+        M, K = self.zm.shape     # K is measurement instruments (typically 3)
+
+        zm = (("measurement_time", "measurement_instrument"), self.zm)
+        zc = (("measurement_time", "measurement_instrument"), self.zc)
+        um = (("measurement_time", "measurement_instrument"), self.um)
+        vm = (("measurement_time", "measurement_instrument"), self.vm)
+        uc = (("measurement_time", "measurement_instrument"), self.uc)
+        vc = (("measurement_time", "measurement_instrument"), self.vc)
+
+        # ---------------------------------------------------------
+        # 3. Stack params across prediction_time
+        # ---------------------------------------------------------
+        params = np.array(self.params)[valid]
+
+        param_A = np.stack([p.A for p in params], axis=0)
+        param_f = np.stack([p.f for p in params], axis=0)
+        param_theta = np.stack([p.theta for p in params], axis=0)
+        param_Etheta = np.stack([p.Etheta for p in params], axis=0)
+        param_kx = np.stack([p.kx for p in params], axis=0)
+        param_ky = np.stack([p.ky for p in params], axis=0)
+        param_omega = np.stack([p.omega for p in params], axis=0)
+        param_use_vel = np.array([int(p.use_vel) for p in params])
+
+        # shapes:
+        #   param_Etheta: (Np, F, D)
+        #   param_A:      (Np, C)
+        #   param_f:      (Np, F)
+        #   param_theta:  (Np, D)
+        #   param_kx:     (Np, FD)
+        # etc.
+
+        # ---------------------------------------------------------
+        # 4. Coordinates
+        # ---------------------------------------------------------
+        coords = {
+            "prediction_time": np.arange(tp.size),             # Np
+            "measurement_time": np.arange(M),                  # M
+            "measurement_instrument": np.arange(K),            # K
+            "components": np.arange(param_A.shape[1]),         # C
+            "frequency": np.arange(param_f.shape[1]),          # F
+            "direction": np.arange(param_theta.shape[1]),      # D
+            "frequency_direction": np.arange(param_kx.shape[1])# F*D
+        }
+
+        # ---------------------------------------------------------
+        # 5. Dataset assembly
+        # ---------------------------------------------------------
+        vars = {
+            "tp": (("prediction_time",), tp),
+            "zp": (("prediction_time",), zp),
+            "zt": (("prediction_time",), zt) if zt.size else None,
+            "ut": (("prediction_time",), ut) if ut.size else None,
+            "vt": (("prediction_time",), vt) if vt.size else None,
+            "comp_time": (("prediction_time",), comp_time),
+
+            # measurement data
+            "zm": zm,
+            "zc": zc,
+            "um": um,
+            "vm": vm,
+            "uc": uc,
+            "vc": vc,
+
+            # wave parameters
+            "param_A": (("prediction_time", "components"), param_A),
+            "param_f": (("prediction_time", "frequency"), param_f),
+            "param_theta": (("prediction_time", "direction"), param_theta),
+            "param_Etheta": (("prediction_time", "frequency", "direction"), param_Etheta),
+            "param_kx": (("prediction_time", "frequency_direction"), param_kx),
+            "param_ky": (("prediction_time", "frequency_direction"), param_ky),
+            "param_omega": (("prediction_time", "frequency_direction"), param_omega),
+            "param_use_vel": (("prediction_time",), param_use_vel),
+        }
+
+        # remove any None
+        vars = {k: v for k, v in vars.items() if v is not None}
+
+        # ---------------------------------------------------------
+        # 6. Save
+        # ---------------------------------------------------------
+        ds = xr.Dataset(vars, coords=coords)
+        ds.to_netcdf(path, engine="h5netcdf", invalid_netcdf=False)
+        print(f"Saved prediction to {path}")
+
+
+    '''
+    def to_netcdf(self, path: str):
+        """
+        Write the Prediction object to a NetCDF file.
+        """
+
+        def _force_1d(arr: np.ndarray) -> np.ndarray:
+            # If it is Nx1 or 1xN, flatten to (N,)
+            if arr.ndim == 2 and 1 in arr.shape:
+                return arr.flatten()
+            return arr
+
+        # Fix vector fields
+        self.tp = _force_1d(self.tp)
+        self.zt = _force_1d(self.zt)
+        self.ut = _force_1d(self.ut)
+        self.vt = _force_1d(self.vt)
+        self.zp = _force_1d(self.zp)
+        self.comp_time = _force_1d(self.comp_time)
+
+        # -------------------------------------------------------
+        # 1. Identify valid prediction times (those with params)
+        # -------------------------------------------------------
+        valid = np.array([p.A.size > 0 for p in self.params])
+        if not valid.any():
+            raise RuntimeError("No valid predictions found to save.")
+
+        # Filter all time-based arrays
+        tp = self.tp[valid]
+        zp = self.zp[valid]
+        zt = self.zt[valid]
+        ut = self.ut[valid] if self.ut.size else self.ut
+        vt = self.vt[valid] if self.vt.size else self.vt
+
+        comp_time = self.comp_time[valid]
+
+        params_valid = [self.params[i] for i in np.where(valid)[0]]
+
+        # -------------------------------------------------------
+        # 2. Determine parameter sizes
+        # -------------------------------------------------------
+        Np = len(params_valid)
+
+        # All params share the same dimensionality (40 freq, 25 dir, 1000 kd)
+        F = params_valid[0].f.size
+        D = params_valid[0].theta.size
+        K = params_valid[0].kx.size
+        A_len = params_valid[0].A.size  # 2000
+
+        # -------------------------------------------------------
+        # 3. Preallocate parameter arrays
+        # -------------------------------------------------------
+        A_arr      = np.full((Np, A_len), np.nan)
+        Etheta_arr = np.full((Np, F, D), np.nan)
+        kx_arr     = np.full((Np, K), np.nan)
+        ky_arr     = np.full((Np, K), np.nan)
+        omega_arr  = np.full((Np, K), np.nan)
+
+        # -------------------------------------------------------
+        # 4. Fill arrays with actual parameter values
+        # -------------------------------------------------------
+        for i, p in enumerate(params_valid):
+            A_arr[i, :]       = p.A
+            Etheta_arr[i, :, :] = p.Etheta      # shape (40, 25)
+            kx_arr[i, :]      = p.kx
+            ky_arr[i, :]      = p.ky
+            omega_arr[i, :]   = p.omega
+
+        # -------------------------------------------------------
+        # 5. Build single xarray.Dataset
+        # -------------------------------------------------------
+        ds = xr.Dataset(
+            {
+                # -------- MAIN PREDICTION OUTPUTS --------
+                "tp": ("prediction_time", tp,
+                       {"units": "s", "description": "Prediction times (s since t0)"}),
+
+                "zp": ("prediction_time", zp,
+                       {"units": "m", "description": "Predicted surface elevation"}),
+
+                "zt": ("prediction_time", zt,
+                       {"units": "m", "description": "Truth/verification surface elevation"}),
+
+                "ut": ("prediction_time", ut,
+                       {"units": "m/s"}),
+
+                "vt": ("prediction_time", vt,
+                       {"units": "m/s"}),
+
+                "comp_time": ("prediction_time", comp_time,
+                              {"units": "s", "description": "Prediction compute time"}),
+
+                # -------- PARAMETER ARRAYS --------
+                "A": (("prediction_time", "components"), A_arr,
+                      {"description": "Solved wave amplitude components"}),
+
+                "Etheta": (("prediction_time", "frequency", "direction"), Etheta_arr,
+                           {"units": "m^2/Hz/deg",
+                            "description": "Directional energy spectrum"}),
+
+                "kx": (("prediction_time", "frequency_direction"), kx_arr,
+                       {"units": "1/m", "description": "kx for each freq×dir component"}),
+
+                "ky": (("prediction_time", "frequency_direction"), ky_arr,
+                       {"units": "1/m", "description": "ky for each freq×dir component"}),
+
+                "omega": (("prediction_time", "frequency_direction"), omega_arr,
+                          {"units": "rad/s", "description": "Wave angular frequency"}),
+            },
+
+            coords={
+                "prediction_time": np.arange(Np),
+                "frequency": np.arange(F),
+                "direction": np.arange(D),
+                "instrument": np.arange(self.zp.shape[1]),
+                "components": np.arange(A_len),
+                "frequency_direction": np.arange(K),
+            }
+        )
+
+        # -------------------------------------------------------
+        # 6. Write to NetCDF
+        # -------------------------------------------------------
+        print(f"Writing NetCDF → {path}")
+        ds.to_netcdf(path)
+        print("Done.")
+    '''
+
+    '''
+    def to_netcdf(self, path: str) -> None:
+        """
+        Save prediction results and per-prediction LSQ parameters to a NetCDF file.
+        params[] is stored using NetCDF groups, one per prediction time,
+        because shapes differ (due to removal of zero-energy components).
+        """
+
+        def _force_1d(arr: np.ndarray) -> np.ndarray:
+            # If it is Nx1 or 1xN, flatten to (N,)
+            if arr.ndim == 2 and 1 in arr.shape:
+                return arr.flatten()
+            return arr
+
+        # Fix vector fields
+        self.tp = _force_1d(self.tp)
+        self.zt = _force_1d(self.zt)
+        self.ut = _force_1d(self.ut)
+        self.vt = _force_1d(self.vt)
+        self.zp = _force_1d(self.zp)
+        self.comp_time = _force_1d(self.comp_time)
+
+        # -----------------------------
+        # 1. Write the main Prediction dataset
+        # -----------------------------
+        main_vars = {}
+        for fname, finfo in self.__dataclass_fields__.items():
+            arr = getattr(self, fname)
+
+            if not isinstance(arr, np.ndarray):
+                continue
+
+            if fname == "tp":
+                dims = ("prediction_time",)
+            elif fname == "tm":
+                dims = ("measurement_time", "instrument")
+            elif fname in ("zm", "zc", "um", "vm", "uc", "vc"):
+                dims = ("measurement_time", "instrument")
+            elif fname == "zp":
+                dims = ("prediction_time")
+            elif fname in ("zt", "ut", "vt"):
+                dims = ("prediction_time",)
+            else:
+                # fallback
+                dims = tuple(f"{fname}_dim{i}" for i in range(arr.ndim))
+
+            attrs = {
+                "units": finfo.metadata.get("units", ""),
+                "description": finfo.metadata.get("description", "")
+            }
+
+            main_vars[fname] = (dims, arr, attrs)
+
+        ds_main = xr.Dataset(main_vars)
+        ds_main.to_netcdf(path)
+
+        # -----------------------------
+        # 2. Store per-prediction params as groups
+        # -----------------------------
+        if self.params:
+            for i, p in enumerate(self.params):
+
+                var_dict = {}
+                for pname, pinfo in LSQWavePropParams.__dataclass_fields__.items():
+                    val = getattr(p, pname)
+
+                    if isinstance(val, np.ndarray):
+                        # Build semantic dims
+                        if pname == "Etheta":
+                            dims = ("frequency", "direction")
+                        elif pname == "f":
+                            dims = ("frequency",)
+                        elif pname == "theta":
+                            dims = ("direction",)
+                        elif pname in ("kx", "ky", "omega"):
+                            dims = ("frequency_direction",)
+                        elif pname == "A":
+                            dims = ("components",)
+                        else:
+                            dims = ("scalar",)
+                    else:
+                        # booleans etc.
+                        val = np.array([val])
+                        dims = ("scalar",)
+
+                    attrs = {
+                        "units": pinfo.metadata.get("units", ""),
+                        "description": pinfo.metadata.get("description", "")
+                    }
+
+                    var_dict[pname] = (dims, val, attrs)
+
+                ds_p = xr.Dataset(var_dict)
+                ds_p.to_netcdf(path, mode="a", group=f"params/prediction_{i:03d}")
+    '''
 
 @dataclass
 class WFA:
