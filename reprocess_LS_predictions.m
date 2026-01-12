@@ -1,4 +1,8 @@
 function z=reprocess_LS_predictions(x,y,t,params)
+% reprocess the least squares solution to provide a prediction of heave (z)
+% at a given x,y,t triplet according to previously solved parameters 
+% (amplitudes, wavenumbers and directions) 
+
 z=nan(size(x));
 
 for i=3:length(params)
@@ -12,8 +16,8 @@ phi=x(i,:)'*params(i).kx'+y(i,:)'*params(i).ky'-t(i,:)'*params(i).omega';
 
 if params(i).use_vel
 P = [[cos(phi),sin(phi)];...
-    [(kx./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*cos(phi),(params(i).kx./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*sin(phi)];...
-    [(ky./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*cos(phi),(params(i).ky./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*sin(phi)]]; 
+    [(params(i).kx./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*cos(phi),(params(i).kx./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*sin(phi)];...
+    [(params(i).ky./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*cos(phi),(params(i).ky./sqrt(params(i).kx.^2+params(i).ky.^2))'.*params(i).omega'.*sin(phi)]]; 
 else
 P = [cos(phi),sin(phi)];
 end

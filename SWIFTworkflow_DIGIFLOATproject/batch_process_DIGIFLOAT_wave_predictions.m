@@ -1,4 +1,6 @@
 function batch_process_DIGIFLOAT_wave_predictions(data_deny)
+% batch process existing SWIFT data (SD card offload)
+% looping through "bursts" of raw data 
 
 files=dir('./Sep7-Oct4/prediction_bursts/*.mat');
 

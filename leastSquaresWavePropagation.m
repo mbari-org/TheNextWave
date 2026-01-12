@@ -1,23 +1,30 @@
 function [z2,zc,params,t] = leastSquaresWavePropagation(z1,u1,v1,t1,x1,y1,t2,x2,y2,wavespec)
-%This function uses time series of vertical displacement and horizontal velocities to
-%generate a phase-resolved prediction of sea surface elevation at a specified time & location
-%using an inverse linear model.
-
-%input
-%z1:       vertical displacement time series where M is the length of record and 
+% This function uses time series of vertical displacement and horizontal velocities to
+% generate a phase-resolved prediction of sea surface elevation at a specified time & location
+% using an inverse linear model.  
+% The solution is constrained by the directional spectra E(f,theta)
+%
+% INPUT
+%   z1:  vertical displacement time series where M is the length of record and 
 %          P is the number of point measurements.
-% u1,v1:   measurements of east, north velocities at sea surface (same size
+%   u1,v1:   measurements of east, north velocities at sea surface (same size
 %          as z1) [m/s]
-%t1:       time stamp of measurements [seconds]
-%x1,y1:    easting, northing of measurement locations [meters]
-%wavespec: data structure containing the following fields
+%   t1:       time stamp of measurements [seconds]
+%   x1,y1:    easting, northing of measurement locations [meters]
+%   wavespec: data structure containing the following fields
 %          Etheta - measured directional wave spectrum (Nautical convention)
 %          f - vector of wave frequencies [Hz]
 %          theta - vector of wave directions [degrees]
-        
-%t2:       time stamp for prediction [seconds]
-%x2,y2:    easting, northing of target location for prediction [meters]
-        
+%        
+%   t2:       time stamp for prediction [seconds]
+%   x2,y2:    easting, northing of target location for prediction [meters]
+%
+% OUTPUT
+%   z2: predicted vertical displacement at location x2, y2 during t2
+%   zc: predicted vertical displacement via alt formulation
+%   parameters from the matrix inversion (amplitudes and phases)
+%
+% A. Fisher, 2019-2024
 
 if ~isempty(u1) & ~isempty(v1)
 use_vel=true;

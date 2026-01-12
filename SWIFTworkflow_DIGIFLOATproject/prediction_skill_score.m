@@ -1,4 +1,7 @@
 function P=prediction_skill_score(array,prediction)
+% create a "dummy" prediction based on random phases 
+% and compare with deterministic prediction to get a skill score
+
 for i=1:50
 [Etheta(:,:,1),wavespec.theta,E(:,1),wavespec.f,~,spread(:,1),spread2(:,1)]=SWIFTdirectionalspectra(array.swift22,false,true);
 [Etheta(:,:,2),~,E(:,2),~,~,spread(:,2),spread2(:,2)]=SWIFTdirectionalspectra(array.swift23,false,true);

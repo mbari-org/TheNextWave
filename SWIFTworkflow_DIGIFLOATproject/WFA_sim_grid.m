@@ -1,4 +1,6 @@
 function [x,y,lon,lat,x0,y0,lon0,lat0]=WFA_sim_grid
+% function to build the spatial grid used for prediction at Wind Floats
+% (specific to Digifloat project)
 lat0=41+(41+11.704/60)/60;
 lon0=-(9+(3+0.777/60)/60);
 

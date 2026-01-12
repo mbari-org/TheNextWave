@@ -1,4 +1,6 @@
 function SWIFT=sbg_postions(swift_no)
+% function to add raw SWIFT positions and into standard SWIFT data structures
+% these positions are required to set up the inversion for the propagator matrix
 cd0=cd();
 cd(['./SWIFT' num2str(swift_no) '_DIGIFLOAT_07Sep2022-04Oct2022/'])
 file=dir('*reprocessedSBG_displacements.mat');
