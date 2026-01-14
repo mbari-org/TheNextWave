@@ -12,7 +12,7 @@ wavespec.spread=mean(spread,2);
 wavespec.spread2=mean(spread2,2);
 E=mean(E,2);
 TM0=trapz(wavespec.f,E)./trapz(wavespec.f,E.*wavespec.f);
-[~,k,s]=disper(95,TM0);
+[~,k,s]=disper(95,TM0); % 95 meters is depth at DIGIFLOAT WFA site
 
 t0=min([array.swift22.rawtime(1),array.swift23.rawtime(1),array.swift24.rawtime(1),array.swift25.rawtime(1)]);
 x0=mean([array.swift22.sbg_x(1),array.swift23.sbg_x(1),array.swift24.sbg_x(1),array.swift25.sbg_x(1)]);

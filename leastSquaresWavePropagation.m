@@ -1,41 +1,43 @@
-function [z2,zc,params,t] = leastSquaresWavePropagation(z1,u1,v1,t1,x1,y1,t2,x2,y2,wavespec)
-% This function uses time series of vertical displacement and horizontal velocities to
-% generate a phase-resolved prediction of sea surface elevation at a specified time & location
-% using an inverse linear model.  
+function [prediction, reconstruction, params, t] = leastSquaresWavePropagation(z_in,u_in,v_in,t_in,x_in,y_in,t_pred,x_pred,y_pred,wavespec)
+% This function uses time series of vertical displacement (and horizontal velocities) to
+% generate a phase-resolved prediction of sea surface elevation (and horizontal velocities) 
+% at a specified time & location using an inverse linear model.  
 % The solution is constrained by the directional spectra E(f,theta)
 %
 % INPUT
-%   z1:  vertical displacement time series where M is the length of record and 
+%   z_in:  vertical displacement time series where M is the length of record and 
 %          P is the number of point measurements.
-%   u1,v1:   measurements of east, north velocities at sea surface (same size
-%          as z1) [m/s]
-%   t1:       time stamp of measurements [seconds]
-%   x1,y1:    easting, northing of measurement locations [meters]
+%   u_in,v_in:   measurements of east, north velocities at sea surface (same size as z_in) [m/s]
+%           ** the velocities are optional and generally improve prediction accuracy **
+%   t_in:  timestamps of input measurements [seconds]
+%   x_in,y_in:   positions (easting, northing) of measurement locations [meters]
 %   wavespec: data structure containing the following fields
 %          Etheta - measured directional wave spectrum (Nautical convention)
 %          f - vector of wave frequencies [Hz]
-%          theta - vector of wave directions [degrees]
+%          theta - vector of wave directions [degrees from North]
 %        
-%   t2:       time stamp for prediction [seconds]
-%   x2,y2:    easting, northing of target location for prediction [meters]
+%   t_pred:   timestamps for the prediction [seconds]
+%   x_pred,y_pred:  position (easting, northing) of target location for prediction [meters]
 %
 % OUTPUT
-%   z2: predicted vertical displacement at location x2, y2 during t2
-%   zc: predicted vertical displacement via alt formulation
-%   parameters from the matrix inversion (amplitudes and phases)
+%   prediction: predicted z,u,v at location(s) x_pred, y_pred during t_pred
+%       if velocities are empty inputs, velocities will not be predicted
+%   reconstruction: reconstructed z,u,v motions for the input locations x_in, y_in during t_in
+%       if velocities are empty inputs, velocities will not be reconstructed
+%   parameters: details of the solution (amplitudes and phases)
+%   t: time for computation 
 %
-% A. Fisher, 2019-2024
+% A. Fisher and J. Thomson, 2019-2025
 
-if ~isempty(u1) & ~isempty(v1)
-use_vel=true;
+if ~isempty(u_in) & ~isempty(v_in)
+    use_vel=true;
 else
-use_vel=false;
+    use_vel=false;
 end
 
 tic;
 
-%convert wave spectrum to Cartesian coordinates (e.g. direction waves are
-%moving TOWARDS)
+%convert wave spectrum to Cartesian coordinates (e.g. direction waves are moving TOWARDS)
 if size(wavespec.Etheta,1)==length(wavespec.theta)
 wavespec.Etheta=wavespec.Etheta';
 end
@@ -51,8 +53,8 @@ wavespec.Etheta=wavespec.Etheta(:,I);
 DTp=wavespec.theta(c).*pi./180;
 df=gradient(wavespec.f(:));
 
-%Limit solution space to frequencies that statisfy S(f)/max(S(f))>5% &
-%directions that statisfy DTp-pi/2 < DTp < DTp+pi/2
+% Limit solution space to frequencies that statisfy S(f)/max(S(f))>5 
+% and directions that statisfy DTp-pi/2 < DTp < DTp+pi/2
 
 wavespec.E=trapz(wavespec.theta,wavespec.Etheta');
 frange=find((df.*wavespec.E(:))./max(df.*wavespec.E(:))>=0.05);
@@ -73,23 +75,23 @@ omega = sqrt(9.81*k)*ones(size(theta'));
 kx = kx(:);
 ky = ky(:);
 omega = omega(:);
-x1 = x1(:);
-y1 = y1(:);
-t1 = t1(:);
-z1 = z1(:);
-u1 = u1(:);
-v1 = v1(:);
-x2 = x2(:);
-y2 = y2(:);
-t2 = t2(:);
+x_in = x_in(:);
+y_in = y_in(:);
+t_in = t_in(:);
+z_in = z_in(:);
+u_in = u_in(:);
+v_in = v_in(:);
+x_pred = x_pred(:);
+y_pred = y_pred(:);
+t_pred = t_pred(:);
 
-N_input_pts = length(z1);
-if length(x1) ~= N_input_pts || length(y1) ~= N_input_pts || length(t1) ~= N_input_pts
+N_input_pts = length(z_in);
+if length(x_in) ~= N_input_pts || length(y_in) ~= N_input_pts || length(t_in) ~= N_input_pts
     error('All input vectors must be equal length')
 end
 
-N_output_pts = length(t2);
-if length(x2) ~= N_output_pts || length(y2) ~= N_output_pts
+N_output_pts = length(t_pred);
+if length(x_pred) ~= N_output_pts || length(y_pred) ~= N_output_pts
     error('All output vectors must be equal length')
 end
 
@@ -106,15 +108,15 @@ amps=[amps(:);amps(:)];
 amps(isnan(amps))=0;
 
 %Construct Propagator Matrices
-phi1=x1*kx'+y1*ky'-t1*omega';
-phi2=x2*kx'+y2*ky'-t2*omega';
+phi1=x_in*kx'+y_in*ky'-t_in*omega';
+phi2=x_pred*kx'+y_pred*ky'-t_pred*omega';
 
 %P1: Used to invert measured wave data (M1 x N)
 %P2: Used to predict at target location/time (M2 x N)
 %Note: P1 and P2 are consistent formulations, but M1 may be different than M2.
 
 if use_vel
-   P1 = [[cos(phi1),sin(phi1)];...
+P1 = [[cos(phi1),sin(phi1)];...
     [(kx./sqrt(kx.^2+ky.^2))'.*omega'.*cos(phi1),(kx./sqrt(kx.^2+ky.^2))'.*omega'.*sin(phi1)];...
     [(ky./sqrt(kx.^2+ky.^2))'.*omega'.*cos(phi1),(ky./sqrt(kx.^2+ky.^2))'.*omega'.*sin(phi1)]];
 
@@ -131,17 +133,16 @@ P1(:,amps==0)=[];
 P2(:,amps==0)=[];
 amps(amps==0)=[];
 
-%Invert linear model to solve for unknown wave amplitudes using a
-%bounded least-squares approach.
-options = optimoptions('lsqlin','Algorithm','trust-region-reflective');
+%Invert linear model to solve for unknown wave amplitudes using a bounded least-squares approach.
+options = optimoptions('lsqlin','Algorithm','trust-region-reflective'); % some matlab magic here
 if use_vel
-    A = lsqlin(P1,[z1;u1;v1],[],[],[],[],-amps./1.4142,amps./1.4142,[]);
-    zc = P1*A;
-    z2 = P2*A;
+    A = lsqlin(P1,[z_in;u_in;v_in],[],[],[],[],-amps./1.4142,amps./1.4142,[]);
+    reconstruction = P1*A;
+    prediction = P2*A;
 else
-    A = lsqlin(P1,z1,[],[],[],[],-amps./1.4142,amps./1.4142,[]);
-    zc = P1*A;
-    z2 = P2*A;
+    A = lsqlin(P1,z_in,[],[],[],[],-amps./1.4142,amps./1.4142,[]);
+    reconstruction = P1*A;
+    prediction = P2*A;
 end
 
 t=toc;

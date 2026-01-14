@@ -2,6 +2,7 @@ function z=reprocess_LS_predictions(x,y,t,params)
 % reprocess the least squares solution to provide a prediction of heave (z)
 % at a given x,y,t triplet according to previously solved parameters 
 % (amplitudes, wavenumbers and directions) 
+% determined from "leastSquaresWavePropagation.m"
 
 z=nan(size(x));
 
