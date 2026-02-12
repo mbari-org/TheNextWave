@@ -145,7 +145,7 @@ def SWIFTdirectionalspectra(
         westdirs = dir_deg > 180.0
         eastdirs = dir_deg < 180.0
         dir_deg[westdirs] = dir_deg[westdirs] - 180.0
-        dir_deg[eastdirs] = dir_deg[eastirs] + 180.0
+        dir_deg[eastdirs] = dir_deg[eastdirs] + 180.0
 
     # spread in degrees
     if np.isrealobj(spread1):

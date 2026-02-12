@@ -76,10 +76,10 @@ def run_LS_prediction_SWIFTS(
     Etheta24, _, E24, _, _, spread24, spread2_24, _ = SWIFTdirectionalspectra(array.swift24, False, True)
     Etheta25, _, E25, _, _, spread25, spread2_25, _ = SWIFTdirectionalspectra(array.swift25, False, True)
 
-    # print(f'{E22.shape=}')
-    # print(f'{E23.shape=}')
-    # print(f'{E24.shape=}')
-    # print(f'{E25.shape=}')
+    print(f'{E22.shape=}')
+    print(f'{E23.shape=}')
+    print(f'{E24.shape=}')
+    print(f'{E25.shape=}')
 
     Etheta = np.stack([Etheta22, Etheta23, Etheta24, Etheta25], axis=2)
     E = np.column_stack([
@@ -101,8 +101,8 @@ def run_LS_prediction_SWIFTS(
         np.asarray(spread2_25).ravel(order='F')
     ])
 
-    #print('Etheta', Etheta.shape)
-    #print('E', E.shape)
+    print(f'{Etheta.shape=}')
+
     #print('spread', spread.shape)
     #print('spread2', spread2.shape)
     #print('f', f.shape)
@@ -134,10 +134,13 @@ def run_LS_prediction_SWIFTS(
 
 
     TM0 = np.trapz(E.T, x=wavespec.f.T) / np.trapz(E.T * wavespec.f.T, x=wavespec.f.T)
-    # print(f'{TM0.shape=}\n{TM0=}')
+    print(f'{TM0.shape=}\n{TM0=}')
     k, L, C, Cg = sm.wavedispersion(95., TM0, kCalcMethod='exact')
     s = 2. * np.pi / TM0
     Cp = s / k
+
+    print(f'{Cp=}')
+
 
     t0 = np.min([
              to_seconds(array.swift22.rawtime[0]),
@@ -325,6 +328,8 @@ def run_LS_prediction_SWIFTS(
 
         zp, zc, params, t = leastSquaresWavePropagation(zk, uk, vk, tk, xk, yk, tp, xt, yt, wavespec)
 
+        print(f'{zp=}')
+
         # print(f'{zp.shape=} {tp.shape=}')
         # print(f'{zp[:len(tp), :].T.shape=}')
         # print(f'{prediction.zp[target_samp, :].shape=}')
@@ -347,6 +352,10 @@ def run_LS_prediction_SWIFTS(
         prediction.zm[subsample, :] = zk.reshape(n_rows, n_cols)
 
         # [print(f'{v=}') for v in [zp, zc, zk, params, t, prediction.tm]]
+
+        #import sys
+        #sys.exit(0)
+        #return locals()
 
     valid = np.array([p.A.size > 0 for p in prediction.params])
     prediction.tp = prediction.tp[valid]
