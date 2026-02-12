@@ -1,10 +1,12 @@
 #!/usr/bin/python3
 
 from pathlib import Path
+import argparse
 
 import numpy as np
 import scipy.io as spio
 import matplotlib.pyplot as plt
+from matplotlib.animation import FFMpegWriter, PillowWriter
 import utm
 
 from .swift import SWIFTArray, WaveSpec
@@ -14,6 +16,24 @@ from .leastSquaresWavePropagation import leastSquaresWavePropagation
 
 def _loadmat_struct(path: str):
     return spio.loadmat(path, struct_as_record=False, squeeze_me=True)
+
+
+def _parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        '--movie',
+        type=str,
+        default=None,
+        help='Write an animation to this path (.mp4 or .gif).',
+    )
+    p.add_argument('--fps', type=float, default=10.0, help='Movie frames per second.')
+    p.add_argument('--dpi', type=int, default=150, help='Output DPI for the movie frames.')
+    p.add_argument(
+        '--show',
+        action='store_true',
+        help='Show the interactive window even if --movie is set.',
+    )
+    return p.parse_args()
 
 
 def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
@@ -116,6 +136,8 @@ def load_raw_arrays_from_sbg(sbgs, skipwarmup, burstend, latorigin, lonorigin, r
 
 
 if __name__ == '__main__':
+    args = _parse_args()
+
     # local geometry (match MATLAB example)
     latorigin = 41.6878
     lonorigin = -9.0545
@@ -162,111 +184,140 @@ if __name__ == '__main__':
     win_len = int(round(NTe * Te * fs))
     step = int(round(fs))  # ~1 second increments
 
-    plt.ion()
+    if args.movie and not args.show:
+        plt.ioff()
+    else:
+        plt.ion()
+
+    fig = plt.figure(1)
+
+    writer = None
+    movie_path = None
+    if args.movie:
+        movie_path = Path(args.movie)
+        movie_path.parent.mkdir(parents=True, exist_ok=True)
+
+        suffix = movie_path.suffix.lower()
+        if suffix == '.gif':
+            writer = PillowWriter(fps=args.fps)
+        else:
+            writer = FFMpegWriter(fps=args.fps)
 
     A0 = None
-    for ti in range(0, n, step):
-        inputwindow = ti + np.arange(win_len)
-        if inputwindow[-1] >= n:
-            break
 
-        dist = np.sqrt((xin[inputwindow, :] - xtarget) ** 2 + (yin[inputwindow, :] - ytarget) ** 2)
-        maxtargetdistance = float(np.nanmax(dist))
-        leadtime = maxtargetdistance / ce
+    def run_loop(grab_frame=False):
+        global A0
 
-        n_lead = int(np.floor(leadtime))
-        if n_lead < 1:
-            n_lead = 1
+        for ti in range(0, n, step):
+            inputwindow = ti + np.arange(win_len)
+            if inputwindow[-1] >= n:
+                break
 
-        t_end = float(np.nanmax(tin[inputwindow, :]))
-        tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
+            dist = np.sqrt((xin[inputwindow, :] - xtarget) ** 2 + (yin[inputwindow, :] - ytarget) ** 2)
+            maxtargetdistance = float(np.nanmax(dist))
+            leadtime = maxtargetdistance / ce
 
-        xpred = np.full_like(tpred, xtarget, dtype=float)
-        ypred = np.full_like(tpred, ytarget, dtype=float)
+            n_lead = int(np.floor(leadtime))
+            if n_lead < 1:
+                n_lead = 1
 
-        # solver mutates wavespec internals; pass copies each call
-        ws = WaveSpec()
-        ws.theta = wavespec_base.theta.copy()
-        ws.f = wavespec_base.f.copy()
-        ws.Etheta = wavespec_base.Etheta.copy()
+            t_end = float(np.nanmax(tin[inputwindow, :]))
+            tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
 
-        pred_vec, recon_vec, params, comp_time = leastSquaresWavePropagation(
-            zin[inputwindow, :],
-            uin[inputwindow, :],
-            vin[inputwindow, :],
-            tin[inputwindow, :],
-            xin[inputwindow, :],
-            yin[inputwindow, :],
-            tpred.reshape((-1, 1)),
-            xpred.reshape((-1, 1)),
-            ypred.reshape((-1, 1)),
-            ws,
-            A0=A0
-        )
-        A0 = params.A
+            xpred = np.full_like(tpred, xtarget, dtype=float)
+            ypred = np.full_like(tpred, ytarget, dtype=float)
 
-        prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
-        zout = prediction[:, 0]
-        uout = prediction[:, 1]
-        vout = prediction[:, 2]
+            # solver mutates wavespec internals; pass copies each call
+            ws = WaveSpec()
+            ws.theta = wavespec_base.theta.copy()
+            ws.f = wavespec_base.f.copy()
+            ws.Etheta = wavespec_base.Etheta.copy()
 
-        reconstruction = np.asarray(recon_vec).reshape((inputwindow.size, -1), order='F')
-        zr = reconstruction[:, 0:nbuoys]
-        ur = reconstruction[:, nbuoys:2 * nbuoys]
-        vr = reconstruction[:, 2 * nbuoys:3 * nbuoys]
+            pred_vec, recon_vec, params, comp_time = leastSquaresWavePropagation(
+                zin[inputwindow, :],
+                uin[inputwindow, :],
+                vin[inputwindow, :],
+                tin[inputwindow, :],
+                xin[inputwindow, :],
+                yin[inputwindow, :],
+                tpred.reshape((-1, 1)),
+                xpred.reshape((-1, 1)),
+                ypred.reshape((-1, 1)),
+                ws,
+                A0=A0,
+            )
+            A0 = params.A
 
-        plt.figure(1)
-        plt.clf()
+            prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
+            zout = prediction[:, 0]
+            uout = prediction[:, 1]
+            vout = prediction[:, 2]
 
-        ax = plt.subplot(2, 2, 2)
-        ax.plot(xin[inputwindow, :], yin[inputwindow, :], 'x', linewidth=2)
-        ax.plot(xpred, ypred, 'ko', linewidth=2, markersize=6)
-        ax.set_xlim(0, 500)
-        ax.set_ylim(0, 500)
-        ax.set_xlabel('x [m]')
-        ax.set_ylabel('y [m]')
-        ax.grid(True)
-        ax.set_aspect('equal', adjustable='box')
+            reconstruction = np.asarray(recon_vec).reshape((inputwindow.size, -1), order='F')
+            zr = reconstruction[:, 0:nbuoys]
+            ur = reconstruction[:, nbuoys:2 * nbuoys]
+            vr = reconstruction[:, 2 * nbuoys:3 * nbuoys]
 
-        plt.subplot(6, 2, 1)
-        plt.plot(tin[inputwindow, :], zin[inputwindow, :])
-        plt.ylabel('z in [m]')
+            fig.clf()
 
-        plt.subplot(6, 2, 3)
-        plt.plot(tin[inputwindow, :], uin[inputwindow, :])
-        plt.ylabel('u in [m/s]')
+            ax = fig.add_subplot(2, 2, 2)
+            ax.plot(xin[inputwindow, :], yin[inputwindow, :], 'x', linewidth=2)
+            ax.plot(xpred, ypred, 'ko', linewidth=2, markersize=6)
+            ax.set_xlim(0, 500)
+            ax.set_ylim(0, 500)
+            ax.set_xlabel('x [m]')
+            ax.set_ylabel('y [m]')
+            ax.grid(True)
+            ax.set_aspect('equal', adjustable='box')
 
-        plt.subplot(6, 2, 5)
-        plt.plot(tin[inputwindow, :], vin[inputwindow, :])
-        plt.ylabel('v in [m/s]')
+            fig.add_subplot(6, 2, 1)
+            plt.plot(tin[inputwindow, :], zin[inputwindow, :])
+            plt.ylabel('z in [m]')
 
-        plt.subplot(6, 2, 7)
-        plt.plot(tin[inputwindow, :], zr)
-        plt.ylabel('z recon [m]')
+            fig.add_subplot(6, 2, 3)
+            plt.plot(tin[inputwindow, :], uin[inputwindow, :])
+            plt.ylabel('u in [m/s]')
 
-        plt.subplot(6, 2, 9)
-        plt.plot(tin[inputwindow, :], ur)
-        plt.ylabel('u recon [m/s]')
+            fig.add_subplot(6, 2, 5)
+            plt.plot(tin[inputwindow, :], vin[inputwindow, :])
+            plt.ylabel('v in [m/s]')
 
-        plt.subplot(6, 2, 11)
-        plt.plot(tin[inputwindow, :], vr)
-        plt.ylabel('v recon [m/s]')
-        plt.xlabel('t [s]')
+            fig.add_subplot(6, 2, 7)
+            plt.plot(tin[inputwindow, :], zr)
+            plt.ylabel('z recon [m]')
 
-        plt.subplot(6, 2, 8)
-        plt.plot(tpred, zout, 'k')
-        plt.ylabel('z pred [m]')
+            fig.add_subplot(6, 2, 9)
+            plt.plot(tin[inputwindow, :], ur)
+            plt.ylabel('u recon [m/s]')
 
-        plt.subplot(6, 2, 10)
-        plt.plot(tpred, uout, 'k')
-        plt.ylabel('u pred [m/s]')
+            fig.add_subplot(6, 2, 11)
+            plt.plot(tin[inputwindow, :], vr)
+            plt.ylabel('v recon [m/s]')
+            plt.xlabel('t [s]')
 
-        plt.subplot(6, 2, 12)
-        plt.plot(tpred, vout, 'k')
-        plt.ylabel('v pred [m/s]')
-        plt.xlabel('t [s]')
+            fig.add_subplot(6, 2, 8)
+            plt.plot(tpred, zout, 'k')
+            plt.ylabel('z pred [m]')
 
-        plt.pause(0.001)
+            fig.add_subplot(6, 2, 10)
+            plt.plot(tpred, uout, 'k')
+            plt.ylabel('u pred [m/s]')
+
+            fig.add_subplot(6, 2, 12)
+            plt.plot(tpred, vout, 'k')
+            plt.ylabel('v pred [m/s]')
+            plt.xlabel('t [s]')
+
+            if grab_frame:
+                writer.grab_frame()
+            else:
+                plt.pause(0.001)
+
+    if writer is not None:
+        with writer.saving(fig, str(movie_path), dpi=args.dpi):
+            run_loop(grab_frame=True)
+    else:
+        run_loop(grab_frame=False)
 
     plt.ioff()
     plt.show()
