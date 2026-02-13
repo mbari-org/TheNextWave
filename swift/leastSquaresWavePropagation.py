@@ -7,6 +7,64 @@ import scipy.linalg as splin
 from .swift import LSQWavePropParams
 
 
+def _solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
+    '''
+    Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub
+
+    Uses:
+      - row scaling (improves conditioning)
+      - column scaling (improves conditioning)
+      - L-BFGS-B (fast, supports warm start via x0)
+    '''
+    # Row scaling: scale each row by its RMS to avoid huge disparities
+    row_rms = np.sqrt(np.mean(P * P, axis=1))
+    row_rms[row_rms == 0.0] = 1.0
+    w = 1.0 / row_rms
+    Pw = P * w[:, None]
+    bw = b * w
+
+    # Column scaling: normalize columns
+    col_rms = np.sqrt(np.mean(Pw * Pw, axis=0))
+    col_rms[col_rms == 0.0] = 1.0
+    Ps = Pw / col_rms[None, :]
+
+    # Variable scaling: x = xs / col_rms  <=>  Ps xs ~ bw
+    lb_s = lb * col_rms
+    ub_s = ub * col_rms
+
+    if x0 is None:
+        xs0 = np.zeros(P.shape[1])
+    else:
+        xs0 = x0 * col_rms
+
+    xs0 = np.minimum(np.maximum(xs0, lb_s), ub_s)
+
+    def fun(xs):
+        r = Ps @ xs - bw
+        return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
+
+    def jac(xs):
+        r = Ps @ xs - bw
+        return Ps.T @ r + ridge * xs
+
+    bounds = list(zip(lb_s, ub_s))
+
+    res = spo.minimize(
+        fun,
+        xs0,
+        jac=jac,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-6}
+    )
+
+    xs = res.x
+    x = xs / col_rms
+    return x, res
+
+
+
+
 def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0=None):
     """
     Phase-resolved prediction of sea surface elevation at a specified time & location
@@ -263,61 +321,6 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     rank_qr = np.sum(np.abs(np.diag(R)) > 1e-10)
     print("QR rank =", rank_qr)
     """
-
-    def _solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
-        '''
-        Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub
-
-        Uses:
-          - row scaling (improves conditioning)
-          - column scaling (improves conditioning)
-          - L-BFGS-B (fast, supports warm start via x0)
-        '''
-        # Row scaling: scale each row by its RMS to avoid huge disparities
-        row_rms = np.sqrt(np.mean(P * P, axis=1))
-        row_rms[row_rms == 0.0] = 1.0
-        w = 1.0 / row_rms
-        Pw = P * w[:, None]
-        bw = b * w
-
-        # Column scaling: normalize columns
-        col_rms = np.sqrt(np.mean(Pw * Pw, axis=0))
-        col_rms[col_rms == 0.0] = 1.0
-        Ps = Pw / col_rms[None, :]
-
-        # Variable scaling: x = xs / col_rms  <=>  Ps xs ~ bw
-        lb_s = lb * col_rms
-        ub_s = ub * col_rms
-
-        if x0 is None:
-            xs0 = np.zeros(P.shape[1])
-        else:
-            xs0 = x0 * col_rms
-
-        xs0 = np.minimum(np.maximum(xs0, lb_s), ub_s)
-
-        def fun(xs):
-            r = Ps @ xs - bw
-            return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
-
-        def jac(xs):
-            r = Ps @ xs - bw
-            return Ps.T @ r + ridge * xs
-
-        bounds = list(zip(lb_s, ub_s))
-
-        res = spo.minimize(
-            fun,
-            xs0,
-            jac=jac,
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-6}
-        )
-
-        xs = res.x
-        x = xs / col_rms
-        return x, res
 
     import time
     t_0 = time.time()

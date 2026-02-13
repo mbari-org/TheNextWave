@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, PillowWriter
 import utm
 
-from .swift import SWIFTArray, WaveSpec
+from .swift import Prediction, SWIFTArray, WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
 
@@ -204,9 +204,10 @@ if __name__ == '__main__':
             writer = FFMpegWriter(fps=args.fps)
 
     A0 = None
-
+    all_preds = Prediction()
     def run_loop(grab_frame=False):
         global A0
+        global all_preds
 
         for ti in range(0, n, step):
             inputwindow = ti + np.arange(win_len)
@@ -257,6 +258,26 @@ if __name__ == '__main__':
             zr = reconstruction[:, 0:nbuoys]
             ur = reconstruction[:, nbuoys:2 * nbuoys]
             vr = reconstruction[:, 2 * nbuoys:3 * nbuoys]
+
+            window_start_time = float(np.nanmin(tin[inputwindow, :]))
+            all_preds.append_window(
+                window_start_time=window_start_time,
+                tm=tin[inputwindow, :],
+                zm=zin[inputwindow, :],
+                um=uin[inputwindow, :],
+                vm=vin[inputwindow, :],
+                xm=xin[inputwindow, :],
+                ym=yin[inputwindow, :],
+                zc=zr,
+                uc=ur,
+                vc=vr,
+                tp=tpred,
+                zp=zout,
+                up=uout,
+                vp=vout,
+                params=params,
+                comp_time=float(comp_time),
+            )
 
             fig.clf()
 
@@ -319,5 +340,6 @@ if __name__ == '__main__':
     else:
         run_loop(grab_frame=False)
 
+    all_preds.to_netcdf('predictions.nc')
     plt.ioff()
     plt.show()
