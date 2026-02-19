@@ -76,15 +76,22 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
         y1 = np.abs(1. - p1 * e1 - p2 * e2)**2.
 
         #S(:, n) is the directional distribution across all frequencies (:) and directions (n).
-        S[:, n] = (x1 / y1)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            S[:, n] = (x1 / y1)
     S = np.real(S)
+    S = np.where(np.isfinite(S), S, 0.0)
 
     # normalize each frequency band by the total across all directions so that the integral of
     # S(theta:f) is 1. Sn is the normalized directional distribution
     Sn = np.zeros_like(S)
     tot = np.sum(S, axis=1) * dtheta * dr
-    for ii in range(len(en)):  # each frequency
-        Sn[ii, :] = S[ii, :] / tot[ii]
+    # If tot is invalid/zero, fall back to a uniform distribution (1/(2*pi)).
+    uniform = 1.0 / (2.0 * np.pi)
+    for ii in range(len(en)):
+        if not np.isfinite(tot[ii]) or tot[ii] <= 0.0:
+            Sn[ii, :] = uniform
+        else:
+            Sn[ii, :] = S[ii, :] / tot[ii]
 
     # calculate energy density by multiplying the energies at each frequency by the normalized
     # directional distribution at that frequency

@@ -29,6 +29,13 @@ def _solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
     col_rms[col_rms == 0.0] = 1.0
     Ps = Pw / col_rms[None, :]
 
+    # Warm-start safety: the number of columns can change when the spectrum-driven
+    # pruning changes, so ignore an incompatible initial guess instead of failing.
+    if x0 is not None:
+        x0 = np.asarray(x0, dtype=float).reshape(-1)
+        if x0.shape[0] != P.shape[1]:
+            x0 = None
+
     # Variable scaling: x = xs / col_rms  <=>  Ps xs ~ bw
     lb_s = lb * col_rms
     ub_s = ub * col_rms
@@ -180,11 +187,11 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
 
     N_input_pts = len(z1)
     if len(x1) != N_input_pts or len(y1) != N_input_pts or len(t1) != N_input_pts:
-        print('Error: All input vectors must be equal length')
+        print('Error: All input vectors must be equal length', flush=True)
 
     N_output_pts = len(t2)
     if len(x2) != N_output_pts or len(y2) != N_output_pts:
-        print('Error: All output vectors must be equal length')
+        print('Error: All output vectors must be equal length', flush=True)
 
     # Interpolate measured spectrum to solution space
     F, T = np.meshgrid(wavespec.f, wavespec.theta)       # (M, N)
@@ -365,7 +372,7 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     )
 
     t = time.time() - t_0
-    print(f"solve time: {t:.4f} s")
+    print(f"solve time: {t:.4f} s", flush=True)
     #print(f"{A.sum()=}")
 
     # reconstructed fields

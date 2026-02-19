@@ -28,3 +28,4 @@ dependencies = [
 
 [project.scripts]
 the_next_wave_example = "the_next_wave.example:main"
+the_next_wave_sim_node = "the_next_wave.the_next_wave_node:main"

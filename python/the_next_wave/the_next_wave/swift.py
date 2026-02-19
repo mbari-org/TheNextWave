@@ -211,13 +211,30 @@ class SWIFTData:
     wavespectra: WaveSpectra = field(default_factory=WaveSpectra, metadata={
         "desc": "structure containing IMU spectral wave data"
     })
+     
+    sbg_x: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "m",
+        "desc": "UTM x position interpolated from SBG GPS"
+    })
+    sbg_y: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "m",
+        "desc": "UTM y position interpolated from SBG GPS"
+    })
+    sbg_lat: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "deg",
+        "desc": "latitude interpolated from SBG GPS"
+    })
+    sbg_lon: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
+        "units": "deg",
+        "desc": "longitude interpolated from SBG GPS"
+    })
 
     CTdepth: npt.NDArray[np.float64] = field(default=empty_float64, metadata={
         "units": "TODO",
         "desc": "TODO"
     })
 
-    ID: npt.NDArray[int] = field(default=empty_float64, metadata={
+    ID: npt.NDArray[np.int_] = field(default_factory=empty_int, metadata={
         "units": "-",
         "desc": "SWIFT ID"
     })
@@ -365,27 +382,68 @@ class SWIFTData:
     #        return cls()
     #    return cls(
 
-class _SWIFTData:
-    pass
-class _SBGData:
-    pass
+
+@dataclass
+class SBGShipMotion:
+    time_stamp: npt.NDArray[np.float64] = field(default=empty_float64)
+    heave: npt.NDArray[np.float64] = field(default=empty_float64)
+
+
+@dataclass
+class SBGGpsVel:
+    time_stamp: npt.NDArray[np.float64] = field(default=empty_float64)
+    vel_e: npt.NDArray[np.float64] = field(default=empty_float64)
+    vel_n: npt.NDArray[np.float64] = field(default=empty_float64)
+
+
+@dataclass
+class SBGGpsPos:
+    time_stamp: npt.NDArray[np.float64] = field(default=empty_float64)
+    lat: npt.NDArray[np.float64] = field(default=empty_float64)
+    long: npt.NDArray[np.float64] = field(default=empty_float64)
+
+
+@dataclass
+class SBGUtcTime:
+    year: npt.NDArray[np.float64] = field(default=empty_float64)
+    month: npt.NDArray[np.float64] = field(default=empty_float64)
+    day: npt.NDArray[np.float64] = field(default=empty_float64)
+    hour: npt.NDArray[np.float64] = field(default=empty_float64)
+    min: npt.NDArray[np.float64] = field(default=empty_float64)
+    sec: npt.NDArray[np.float64] = field(default=empty_float64)
+    nanosec: npt.NDArray[np.float64] = field(default=empty_float64)
+    time_stamp: npt.NDArray[np.float64] = field(default=empty_float64)
+
+
+@dataclass
+class SBGData:
+    ShipMotion: SBGShipMotion = field(default_factory=SBGShipMotion)
+    GpsVel: SBGGpsVel = field(default_factory=SBGGpsVel)
+    GpsPos: SBGGpsPos = field(default_factory=SBGGpsPos)
+    UtcTime: SBGUtcTime = field(default_factory=SBGUtcTime)
 
 @dataclass
 class SWIFTArray:
-    swift22: _SWIFTData = field(default=None)
-    sbg22: _SBGData = field(default=None)
-    swift23: _SWIFTData = field(default=None)
-    sbg23: _SBGData = field(default=None)
-    swift24: _SWIFTData = field(default=None)
-    sbg24: _SBGData = field(default=None)
-    swift25: _SWIFTData = field(default=None)
-    sbg25: _SBGData = field(default=None)
+    swift22: SWIFTData = field(default=None)
+    sbg22: SBGData = field(default=None)
+    swift23: SWIFTData = field(default=None)
+    sbg23: SBGData = field(default=None)
+    swift24: SWIFTData = field(default=None)
+    sbg24: SBGData = field(default=None)
+    swift25: SWIFTData = field(default=None)
+    sbg25: SBGData = field(default=None)
+
+    def bursts(self, raw_sbg: bool = False):
+        if raw_sbg:
+            return [self.sbg22, self.sbg23, self.sbg24, self.sbg25]
+        else:
+            return [self.swift22, self.swift23, self.swift24, self.swift25]
 
     @classmethod
     def from_mdat(
         cls,
-        swiftdat: "MATLAB swift data" = None,
-        sbgdat: "MATLAB sbgdata" = None,
+        swiftdat: Optional[Any] = None,  # MATLAB swift data
+        sbgdat: Optional[Any] = None,  # MATLAB sbgdata
         select_idx=None
     ):
         swifts = [None, None, None, None]
@@ -427,7 +485,7 @@ class SWIFTArray:
 @dataclass
 class LSQWavePropParams:
     """
-    Solver output parameters for the least–squares wave–propagation model.
+    Solver output parameters for the least-squares wave-propagation model.
 
     Shapes:
         - A: (N,), wave amplitude solution vector (concatenated cosine/sine components)
@@ -438,7 +496,7 @@ class LSQWavePropParams:
         - omega: (N,), angular frequencies [rad/s]
 
     Purpose:
-        Stores all per–target diagnostic outputs needed for spectrum
+        Stores all per-target diagnostic outputs needed for spectrum
         reconstruction and physics-quality verification.
     """
     A: npt.NDArray[np.float64] = field(
@@ -446,7 +504,7 @@ class LSQWavePropParams:
         metadata={
             "units": "m",
             "description": "Wave amplitudes (cosine and sine components concatenated). "
-                           "Length = 2000 = 25 directions × 40 frequencies × 2."
+                           "Length = 2000 = 25 directions x 40 frequencies x 2."
         },
     )
     Etheta: npt.NDArray[np.float64] = field(
@@ -454,7 +512,7 @@ class LSQWavePropParams:
         metadata={
             "units": "m^2/Hz/deg",
             "description": "Directional wave energy spectrum. "
-                           "Dimensions: direction (25) × frequency (40)."
+                           "Dimensions: direction (25) x frequency (40)."
         },
     )
     f: npt.NDArray[np.float64] = field(
@@ -475,21 +533,21 @@ class LSQWavePropParams:
         default_factory=empty_float64,
         metadata={
             "units": "1/m",
-            "description": "x-component of wavenumber for each (direction×frequency) = 1000 components."
+            "description": "x-component of wavenumber for each (direction x frequency) = 1000 components."
         },
     )
     ky: npt.NDArray[np.float64] = field(
         default_factory=empty_float64,
         metadata={
             "units": "1/m",
-            "description": "y-component of wavenumber for each (direction×frequency) = 1000 components."
+            "description": "y-component of wavenumber for each (direction x frequency) = 1000 components."
         },
     )
     omega: npt.NDArray[np.float64] = field(
         default_factory=empty_float64,
         metadata={
             "units": "rad/s",
-            "description": "Angular frequency for each (direction×frequency) = 1000 components."
+            "description": "Angular frequency for each (direction x frequency) = 1000 components."
         },
     )
     use_vel: bool = field(

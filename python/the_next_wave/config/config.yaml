@@ -1,0 +1,8 @@
+/the_next_wave_node:
+  ros__parameters:
+    downsample_to_hz: 0.0
+    swifts:
+      swift22: 1
+      swift23: 2
+      swift24: 3
+      swift25: 4

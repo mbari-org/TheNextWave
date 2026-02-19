@@ -4,14 +4,16 @@ from pathlib import Path
 import argparse
 
 import numpy as np
-import scipy.io as spio
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, PillowWriter
-import utm
 
 from .swift import Prediction, SWIFTArray, WaveSpec
-from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
+from .utilities import (
+    build_wavespec_from_swifts,
+    centroid_period_and_phase_speed,
+    load_raw_arrays_from_sbg,
+)
 
 from .download_example_data import get_example_data_dir
 
@@ -32,105 +34,6 @@ def _parse_args():
         help='Show the interactive window even if --movie is set.',
     )
     return p.parse_args()
-
-
-def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
-    lat = np.asarray(lat, dtype=float)
-    lon = np.asarray(lon, dtype=float)
-
-    e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
-
-    e = np.empty_like(lat, dtype=float)
-    n = np.empty_like(lat, dtype=float)
-    for i in range(lat.size):
-        ei, ni, zn, zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
-        e.flat[i] = ei
-        n.flat[i] = ni
-
-    dx = e - e0
-    dy = n - n0
-
-    ang = np.deg2rad(rotation_deg)
-    c = np.cos(ang)
-    s = np.sin(ang)
-
-    x = dx * c + dy * s
-    y = -dx * s + dy * c
-    return x, y
-
-
-def build_wavespec_from_swifts(swifts, recip=True):
-    Ethetas = []
-    theta0 = None
-    f0 = None
-
-    for sw in swifts:
-        Etheta, theta, E, f, _, spread, spread2, _ = SWIFTdirectionalspectra(sw, plotflag=False, recip=recip)
-        Ethetas.append(Etheta)
-        if theta0 is None:
-            theta0 = theta.copy()
-            f0 = f.copy()
-
-    ws = WaveSpec()
-    ws.theta = theta0
-    ws.f = f0
-    ws.Etheta = np.nanmean(np.stack(Ethetas, axis=2), axis=2)
-    return ws
-
-
-def centroid_period_and_phase_speed(ws):
-    Etheta = ws.Etheta
-    f = ws.f
-
-    if Etheta.shape[0] != f.size and Etheta.shape[1] == f.size:
-        Etheta = Etheta.T
-
-    Ef = np.sum(Etheta, axis=1)
-    Te = np.sum(Etheta) / np.sum(Ef * f)
-    ce = 9.8 * Te / (2.0 * 3.14)
-    return Te, ce
-
-
-def load_raw_arrays_from_sbg(sbgs, skipwarmup, burstend, latorigin, lonorigin, rotation):
-    sl = slice(skipwarmup - 1, burstend)
-
-    zin = []
-    uin = []
-    vin = []
-    tin = []
-    xin = []
-    yin = []
-
-    for sbg in sbgs:
-        z = np.asarray(sbg.ShipMotion.heave)[sl].astype(float)
-        ztime = np.asarray(sbg.ShipMotion.time_stamp)[sl].astype(float) / 1e6
-
-        u = np.asarray(sbg.GpsVel.vel_e)[sl].astype(float)
-        v = np.asarray(sbg.GpsVel.vel_n)[sl].astype(float)
-
-        lat = np.asarray(sbg.GpsPos.lat)[sl].astype(float)
-        lon = np.asarray(sbg.GpsPos.long)[sl].astype(float)
-
-        x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
-
-        zin.append(z)
-        uin.append(u)
-        vin.append(v)
-        tin.append(ztime)
-        xin.append(x)
-        yin.append(y)
-
-    zin = np.column_stack(zin)
-    uin = np.column_stack(uin)
-    vin = np.column_stack(vin)
-    tin = np.column_stack(tin)
-    xin = np.column_stack(xin)
-    yin = np.column_stack(yin)
-
-    zin = -zin  # SBG mounted upside-down on SWIFT
-
-    fs = 1.0 / float(np.nanmean(np.diff(tin, axis=0)))
-    return zin, uin, vin, tin, xin, yin, fs
 
 
 A0 = None
@@ -170,14 +73,12 @@ def main():
     swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
 
     # 1) wavespec via SWIFTdirectionalspectra() on processed SWIFT burst structs
-    swift_bursts = [swifts.swift22, swifts.swift23, swifts.swift24, swifts.swift25]
-    wavespec_base = build_wavespec_from_swifts(swift_bursts, recip=True)
+    wavespec_base = build_wavespec_from_swifts(swifts.bursts(raw_sbg=False), recip=True)
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
 
-    # 2) raw 5 Hz arrays via sbgData burst structs (like MATLAB example)
-    sbg_bursts = [swifts.sbg22, swifts.sbg23, swifts.sbg24, swifts.sbg25]
+    # 2) raw SBGData burst structs
     zin, uin, vin, tin, xin, yin, fs = load_raw_arrays_from_sbg(
-        sbg_bursts, skipwarmup, burstend, latorigin, lonorigin, rotation
+        swifts.bursts(raw_sbg=True), skipwarmup, burstend, latorigin, lonorigin, rotation
     )
 
     nbuoys = zin.shape[1]
