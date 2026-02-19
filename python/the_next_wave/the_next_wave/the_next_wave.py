@@ -33,6 +33,15 @@ class TheNextWaveConfig:
     expected_fs: float = 5.0
     rotation_deg: float = 0.0
     n_te: float = 10.0
+    # If > 0, reuse the most recently computed usable wavespec until this
+    # many seconds of (measurement) time have elapsed, then refresh.
+    # This can reduce CPU usage and improve warm-start stability (A0).
+    wavespec_update_period_sec: float = 0.0
+    # Prediction time grid configuration.
+    # By default, match example.py behavior: 1 Hz predictions with horizon
+    # determined by target distance / phase speed.
+    prediction_dt_s: float = 1.0
+    prediction_horizon_s: float = 0.0
 
 
 class TheNextWave:
@@ -46,6 +55,7 @@ class TheNextWave:
         self.lat_origin: float | None = None
         self.lon_origin: float | None = None
         self._last_wavespec: WaveSpec | None = None
+        self._last_wavespec_time_s: float | None = None
 
     def _wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
         if ws is None:
@@ -88,23 +98,38 @@ class TheNextWave:
             Dp = float(swift_data.peakwavedirT[0])
             results["wave_stats"][swift_name] = {"Hs": Hs, "Tp": Tp, "Dp": Dp}
 
-        wavespec_new = self._build_averaged_wavespec(swift_structs)
-        if self._wavespec_is_usable(wavespec_new):
-            wavespec = wavespec_new
-            self._last_wavespec = wavespec_new
-        elif self._wavespec_is_usable(self._last_wavespec):
-            wavespec = self._last_wavespec
-            if self.logger is not None:
-                self.logger.warn("No usable wavespec from current window; reusing last valid wavespec")
-        else:
-            raise ValueError("No usable wavespec available yet (SBGwaves may still be failing / low energy)")
-
         zin, uin, vin, tin, xin, yin, fs = self._stack_measurement_data(cleaned_sbg)
         fs = float(fs)
         if not np.isfinite(fs) or fs <= 0.0:
             if self.logger is not None:
                 self.logger.warn(f"Invalid fs={fs}; falling back to expected_fs={self.config.expected_fs}")
             fs = float(self.config.expected_fs)
+
+        # Decide whether to refresh the wavespec.
+        # Use the measurement time base (tin) to determine age.
+        current_t_s = float(np.nanmax(tin)) if np.size(tin) else 0.0
+        use_cached = False
+        if self.config.wavespec_update_period_sec > 0.0 and self._wavespec_is_usable(self._last_wavespec):
+            if self._last_wavespec_time_s is not None and np.isfinite(current_t_s):
+                age_s = current_t_s - float(self._last_wavespec_time_s)
+                use_cached = age_s >= 0.0 and age_s < float(self.config.wavespec_update_period_sec)
+
+        wavespec_new = None
+        if not use_cached:
+            wavespec_new = self._build_averaged_wavespec(swift_structs)
+
+        if use_cached:
+            wavespec = self._last_wavespec
+        elif self._wavespec_is_usable(wavespec_new):
+            wavespec = wavespec_new
+            self._last_wavespec = wavespec_new
+            self._last_wavespec_time_s = current_t_s
+        elif self._wavespec_is_usable(self._last_wavespec):
+            wavespec = self._last_wavespec
+            if self.logger is not None:
+                self.logger.warn("No usable wavespec from current window; reusing last valid wavespec")
+        else:
+            raise ValueError("No usable wavespec available yet (SBGwaves may still be failing / low energy)")
 
         Te, ce = centroid_period_and_phase_speed(wavespec)
         if not np.isfinite(Te) or Te <= 0.0:

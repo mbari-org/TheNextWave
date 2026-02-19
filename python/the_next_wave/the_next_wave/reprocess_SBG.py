@@ -178,8 +178,15 @@ def reprocess_swift_array(
             lat = lat[crop_idx:]
             lon = lon[crop_idx:]
 
-        # Estimate actual sample rate from timestamps (microseconds).
+        # Estimate actual sample rate from timestamps (microseconds), and also
+        # compute a small tolerance for the window span check.
+        #
+        # In streaming / downsampled pipelines, a deque-based rolling window can
+        # legitimately end up one sample interval short of the nominal 256 s
+        # (e.g., 255.8 s at 5 Hz). The node-side window readiness includes a
+        # similar tolerance; we mirror it here to avoid rejecting all buoys.
         fs_used = float(fs)
+        span_tol_s = 0.0
         if t_us.size >= 2:
             dt_s = np.diff(t_us) / 1e6
             dt_s = dt_s[np.isfinite(dt_s) & (dt_s > 0)]
@@ -187,12 +194,21 @@ def reprocess_swift_array(
                 fs_est = float(1.0 / np.nanmean(dt_s))
                 if np.isfinite(fs_est) and fs_est > 0.0:
                     fs_used = fs_est
+
+                dt_med = float(np.nanmedian(dt_s))
+                if np.isfinite(dt_med) and dt_med > 0.0:
+                    # Allow up to ~one sample interval shortfall, clamped.
+                    span_tol_s = float(np.clip(1.5 * dt_med, 0.0, 1.0))
         
         # Check we have a full window of data. Prefer time-span check if timestamps exist.
         if t_us.size >= 2:
             span_s = float((t_us[-1] - t_us[0]) / 1e6)
-            if not np.isfinite(span_s) or span_s < window_duration_s:
-                print(f'{swift_name}: insufficient time span ({span_s:.1f}s < {window_duration_s:.1f}s)')
+            required_span_s = window_duration_s - span_tol_s
+            if not np.isfinite(span_s) or span_s < required_span_s:
+                print(
+                    f'{swift_name}: insufficient time span '
+                    f'({span_s:.1f}s < {required_span_s:.1f}s required; tol={span_tol_s:.3f}s)'
+                )
                 continue
         else:
             if len(z) < min_samples:

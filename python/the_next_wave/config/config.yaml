@@ -1,6 +1,7 @@
 /the_next_wave_node:
   ros__parameters:
-    downsample_to_hz: 0.0
+    downsample_to_hz: 5.0
+    wavespec_update_period_sec: 300.0
     swifts:
       swift22: 1
       swift23: 2

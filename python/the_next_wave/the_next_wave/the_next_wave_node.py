@@ -16,6 +16,7 @@ import numpy as np
 import rclpy
 from rclpy.parameter import Parameter
 from std_msgs.msg import Header
+from builtin_interfaces.msg import Time as TimeMsg
 
 from buoy_api.interface import Interface
 from buoy_interfaces.msg import XBRecord
@@ -51,6 +52,11 @@ class TheNextWaveNode(Interface):
         # Set to 0.0 to disable (use all incoming samples).
         self.declare_parameter("downsample_to_hz", 0.0)
         self.downsample_to_hz = float(self.get_parameter("downsample_to_hz").value)
+
+        # If > 0, recompute the averaged directional spectrum only at this interval
+        # (in measurement time), reusing the last valid wavespec in between.
+        self.declare_parameter("wavespec_update_period_sec", 0.0)
+        self.wavespec_update_period_sec = float(self.get_parameter("wavespec_update_period_sec").value)
         self._last_accept_t_us_by_swift: dict[int, float] = {}
         self._last_seen_t_us_by_swift: dict[int, float] = {}
 
@@ -59,6 +65,7 @@ class TheNextWaveNode(Interface):
                 expected_fs=EXPECTED_FS,
                 rotation_deg=ROTATION,
                 n_te=N_TE,
+                wavespec_update_period_sec=self.wavespec_update_period_sec,
             ),
             logger=self.get_logger(),
         )
@@ -227,7 +234,17 @@ class TheNextWaveNode(Interface):
         # Deque-based rolling window: pop from the left until we're within cutoff.
         # Assumes timestamps are monotonic; we reset the window on detected time jumps.
         try:
-            while sbg.ShipMotion.time_stamp and sbg.ShipMotion.time_stamp[0] < cutoff_t_us:
+            # IMPORTANT: Err slightly on the side of a *too-long* window.
+            #
+            # If we always pop until the oldest sample is >= cutoff, the resulting
+            # span will often be just under WINDOW_DURATION_SEC by ~one sample period
+            # (e.g., 255.8s for 5 Hz) due to discrete sampling. Keeping a single
+            # sample just before the cutoff makes the span slightly >= 256s.
+            while (
+                len(sbg.ShipMotion.time_stamp) >= 2
+                and sbg.ShipMotion.time_stamp[0] < cutoff_t_us
+                and sbg.ShipMotion.time_stamp[1] < cutoff_t_us
+            ):
                 sbg.ShipMotion.time_stamp.popleft()
                 sbg.ShipMotion.heave.popleft()
                 sbg.GpsVel.time_stamp.popleft()
@@ -270,7 +287,10 @@ class TheNextWaveNode(Interface):
         self.window_ready = bool(self.window_ready_by_swift) and all(self.window_ready_by_swift.values())
 
     def process_timer_callback(self):
-        self.get_logger().info(f'window ready? {self.window_ready} :: n={len(self.swifts.sbg22.ShipMotion.time_stamp)} samples :: t={(self.swifts.sbg22.ShipMotion.time_stamp[-1] if self.swifts.sbg22.ShipMotion.time_stamp else float("nan"))/1e6 - (self.swifts.sbg22.ShipMotion.time_stamp[0] if self.swifts.sbg22.ShipMotion.time_stamp else float("nan"))/1e6:.3f} s')
+        self.get_logger().info(f'window ready? {self.window_ready}'
+                               f' :: n={len(self.swifts.sbg22.ShipMotion.time_stamp)} samples'
+                               f' :: t={(self.swifts.sbg22.ShipMotion.time_stamp[-1] if self.swifts.sbg22.ShipMotion.time_stamp else float("nan"))/1e6 \
+                                      - (self.swifts.sbg22.ShipMotion.time_stamp[0] if self.swifts.sbg22.ShipMotion.time_stamp else float("nan"))/1e6:.3f} s')
         with self.data_lock:
             if self.processing or not self.window_ready:
                 return
@@ -327,7 +347,27 @@ class TheNextWaveNode(Interface):
         params = results.get("params")
 
         msg = WavePredictionOutput()
-        msg.header = Header(frame_id="wec_buoy", stamp=self.get_clock().now().to_msg())
+        # PlotJuggler (and most ROS tooling) aligns streams by `header.stamp`.
+        # Use the *measurement* time base (end of window) rather than publish time,
+        # otherwise predictions appear delayed/misaligned relative to incoming data.
+        stamp = self.get_clock().now().to_msg()
+        t_end_s = results.get("window_end_time")
+        try:
+            t_end_s = float(t_end_s)
+        except (TypeError, ValueError):
+            t_end_s = float("nan")
+
+        if np.isfinite(t_end_s) and t_end_s >= 0.0:
+            sec = int(np.floor(t_end_s))
+            nsec = int(np.round((t_end_s - sec) * 1e9))
+            if nsec >= 1_000_000_000:
+                sec += 1
+                nsec -= 1_000_000_000
+            if nsec < 0:
+                nsec = 0
+            stamp = TimeMsg(sec=sec, nanosec=nsec)
+
+        msg.header = Header(frame_id="wec_buoy", stamp=stamp)
 
         msg.window_start_time = float(results["window_start_time"])
         msg.window_end_time = float(results["window_end_time"])
@@ -365,7 +405,20 @@ class TheNextWaveNode(Interface):
 
         for i in range(int(t_pred.size)):
             pred_point = WavePredictionPoint()
-            pred_point.time = float(t_pred[i])
+            # Per-point absolute timestamp for PlotJuggler alignment.
+            # `t_pred` is in the same time base as the incoming SBG timestamps
+            # (ROS/sim time in seconds).
+            t_s = float(t_pred[i])
+            sec = int(np.floor(t_s)) if np.isfinite(t_s) and t_s >= 0.0 else 0
+            nsec = int(np.round((t_s - sec) * 1e9)) if np.isfinite(t_s) and t_s >= 0.0 else 0
+            if nsec >= 1_000_000_000:
+                sec += 1
+                nsec -= 1_000_000_000
+            if nsec < 0:
+                nsec = 0
+            pred_point.header = Header(frame_id="wec_buoy", stamp=TimeMsg(sec=sec, nanosec=nsec))
+
+            pred_point.time = t_s
             pred_point.x = x_target
             pred_point.y = y_target
             pred_point.elevation = float(z_pred[i]) if i < z_pred.size else 0.0

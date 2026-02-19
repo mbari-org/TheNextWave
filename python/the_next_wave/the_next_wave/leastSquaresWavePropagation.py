@@ -1,5 +1,6 @@
 import numpy as np
 trapz = getattr(np, 'trapz', np.trapezoid)
+import sys
 import scipy.stats as sps
 import scipy.optimize as spo
 import scipy.interpolate as spint
@@ -33,7 +34,23 @@ def _solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
     # pruning changes, so ignore an incompatible initial guess instead of failing.
     if x0 is not None:
         x0 = np.asarray(x0, dtype=float).reshape(-1)
-        if x0.shape[0] != P.shape[1]:
+        if x0.size == 0:
+            print("WARNING: warm-start A0 provided but empty; starting from zeros", file=sys.stderr, flush=True)
+            x0 = None
+        elif not np.all(np.isfinite(x0)):
+            n_bad = int(np.size(x0) - np.count_nonzero(np.isfinite(x0)))
+            print(
+                f"WARNING: warm-start A0 contains non-finite values ({n_bad} bad / {x0.size}); starting from zeros",
+                file=sys.stderr,
+                flush=True,
+            )
+            x0 = None
+        elif x0.shape[0] != P.shape[1]:
+            print(
+                f"WARNING: warm-start A0 length mismatch (len(A0)={x0.shape[0]} vs n_cols={P.shape[1]}); starting from zeros",
+                file=sys.stderr,
+                flush=True,
+            )
             x0 = None
 
     # Variable scaling: x = xs / col_rms  <=>  Ps xs ~ bw
