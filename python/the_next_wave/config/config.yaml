@@ -7,3 +7,8 @@
       swift23: 2
       swift24: 3
       swift25: 4
+
+/the_next_wave_plotter_node:
+  ros__parameters:
+    prediction_topic: wave_predictions
+    max_points: 600

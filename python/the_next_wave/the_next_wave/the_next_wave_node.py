@@ -60,6 +60,9 @@ class TheNextWaveNode(Interface):
         self._last_accept_t_us_by_swift: dict[int, float] = {}
         self._last_seen_t_us_by_swift: dict[int, float] = {}
 
+        # WEC "actual" sample (packaged into WavePredictionOutput for external tools)
+        self._wec_actual_latest = None  # dict with keys: t_s, z, u, v
+
         self.predictor = TheNextWave(
             config=TheNextWaveConfig(
                 expected_fs=EXPECTED_FS,
@@ -166,6 +169,23 @@ class TheNextWaveNode(Interface):
             return
 
         with self.data_lock:
+            # Capture WEC "actual" at the target site from inc_wave_heights[0]
+            # so downstream tools can subscribe to only the prediction topic.
+            try:
+                inc0 = data.inc_wave_heights[0]
+                t0_us = inc0.pose.header.stamp.sec * 1e6 + inc0.pose.header.stamp.nanosec / 1e3
+                t0_s = float(t0_us) / 1e6
+                wec_sample = {
+                    "t_s": t0_s,
+                    "z": float(inc0.pose.pose.position.z),
+                    "u": float(inc0.velocities.x),
+                    "v": float(inc0.velocities.y),
+                }
+                self._wec_actual_latest = wec_sample
+            except Exception:
+                # Best-effort; don't break the main ingest path.
+                pass
+
             for swift_name, swift_idx in self.swift_idx.items():
                 swift_num = int(swift_name[-2:])
                 inc = data.inc_wave_heights[swift_idx]
@@ -398,6 +418,48 @@ class TheNextWaveNode(Interface):
 
         x_target = float(results.get("x_target", 0.0))
         y_target = float(results.get("y_target", 0.0))
+        msg.x_target = x_target
+        msg.y_target = y_target
+
+        # Raw measurements (for external plotter/debug tools)
+        t_meas = np.asarray(results.get("t_meas", []), dtype=float)
+        x_meas = np.asarray(results.get("x_meas", []), dtype=float)
+        y_meas = np.asarray(results.get("y_meas", []), dtype=float)
+        z_meas = np.asarray(results.get("z_meas", []), dtype=float)
+        u_meas = np.asarray(results.get("u_meas", []), dtype=float)
+        v_meas = np.asarray(results.get("v_meas", []), dtype=float)
+
+        if t_meas.ndim == 2 and t_meas.shape[1] > 0:
+            msg.measurements.time = t_meas[:, 0].flatten().tolist()
+        else:
+            msg.measurements.time = t_meas.flatten().tolist()
+
+        msg.measurements.x_meas = x_meas.flatten(order="F").tolist() if x_meas.size else []
+        msg.measurements.y_meas = y_meas.flatten(order="F").tolist() if y_meas.size else []
+        msg.measurements.z_meas = z_meas.flatten(order="F").tolist() if z_meas.size else []
+        msg.measurements.u_meas = u_meas.flatten(order="F").tolist() if u_meas.size else []
+        msg.measurements.v_meas = v_meas.flatten(order="F").tolist() if v_meas.size else []
+        msg.measurements.n_samples = int(results.get("n_samples", 0))
+        msg.measurements.n_buoys = int(results.get("n_buoys", 0))
+
+        # Latest actual-at-target sample packaged alongside the prediction.
+        wec = None
+        with self.data_lock:
+            if self._wec_actual_latest is not None:
+                wec = dict(self._wec_actual_latest)
+        if wec is not None:
+            msg.has_wec_actual = True
+            msg.wec_time = float(wec.get("t_s", 0.0))
+            msg.wec_z = float(wec.get("z", 0.0))
+            msg.wec_u = float(wec.get("u", 0.0))
+            msg.wec_v = float(wec.get("v", 0.0))
+        else:
+            msg.has_wec_actual = False
+            msg.wec_time = 0.0
+            msg.wec_z = 0.0
+            msg.wec_u = 0.0
+            msg.wec_v = 0.0
+
         t_pred = np.asarray(results.get("t_pred", []), dtype=float)
         z_pred = np.asarray(results.get("z_pred", []), dtype=float)
         u_pred = np.asarray(results.get("u_pred", []), dtype=float)
@@ -426,7 +488,6 @@ class TheNextWaveNode(Interface):
             pred_point.vel_north = float(v_pred[i]) if i < v_pred.size else 0.0
             msg.predictions.append(pred_point)
 
-        t_meas = np.asarray(results.get("t_meas", []), dtype=float)
         z_recon = np.asarray(results.get("z_recon", []), dtype=float)
         u_recon = np.asarray(results.get("u_recon", []), dtype=float)
         v_recon = np.asarray(results.get("v_recon", []), dtype=float)
