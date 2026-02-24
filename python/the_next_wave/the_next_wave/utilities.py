@@ -327,6 +327,13 @@ def load_raw_arrays_from_sbg(sbgs, *args):
     xin = []
     yin = []
 
+    # Raw SBG fields can occasionally be off-by-one across buoys (or even within
+    # a buoy after cleaning / truncation). Additionally, when ingesting streams
+    # in realtime, each buoy can be a sample ahead/behind at the moment we
+    # snapshot. We align by timestamp using nearest-neighbor matching (no
+    # interpolation) to produce a rectangular matrix for the solver.
+    per_buoy = []
+
     for sbg in sbgs:
         z = np.asarray(sbg.ShipMotion.heave, dtype=float)
         ztime = np.asarray(sbg.ShipMotion.time_stamp, dtype=float) / 1e6
@@ -347,14 +354,109 @@ def load_raw_arrays_from_sbg(sbgs, *args):
             lat = lat[start:stop]
             lon = lon[start:stop]
 
+        n_local = int(min(z.size, ztime.size, u.size, v.size, lat.size, lon.size))
+        if n_local <= 0:
+            continue
+        if n_local != z.size:
+            z = z[:n_local]
+        if n_local != ztime.size:
+            ztime = ztime[:n_local]
+        if n_local != u.size:
+            u = u[:n_local]
+        if n_local != v.size:
+            v = v[:n_local]
+        if n_local != lat.size:
+            lat = lat[:n_local]
+        if n_local != lon.size:
+            lon = lon[:n_local]
+
         x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
 
-        zin.append(z)
-        uin.append(u)
-        vin.append(v)
-        tin.append(ztime)
-        xin.append(x)
-        yin.append(y)
+        x = np.asarray(x, dtype=float).reshape((-1,))
+        y = np.asarray(y, dtype=float).reshape((-1,))
+        ztime = np.asarray(ztime, dtype=float).reshape((-1,))
+        z = np.asarray(z, dtype=float).reshape((-1,))
+        u = np.asarray(u, dtype=float).reshape((-1,))
+        v = np.asarray(v, dtype=float).reshape((-1,))
+
+        n_local2 = int(min(ztime.size, z.size, u.size, v.size, x.size, y.size))
+        if n_local2 <= 0:
+            continue
+        if n_local2 != ztime.size:
+            ztime = ztime[:n_local2]
+        if n_local2 != z.size:
+            z = z[:n_local2]
+        if n_local2 != u.size:
+            u = u[:n_local2]
+        if n_local2 != v.size:
+            v = v[:n_local2]
+        if n_local2 != x.size:
+            x = x[:n_local2]
+        if n_local2 != y.size:
+            y = y[:n_local2]
+
+        per_buoy.append({"t": ztime, "z": z, "u": u, "v": v, "x": x, "y": y})
+
+    if not per_buoy:
+        raise ValueError("No usable samples in SBG inputs")
+
+    # Choose a reference time grid. In the main pipeline sbgs are ordered (swift22..)
+    # so using the first buoy provides stable behavior across runs.
+    t_ref = np.asarray(per_buoy[0]["t"], dtype=float).reshape((-1,))
+    if t_ref.size < 2:
+        raise ValueError("Not enough reference samples for alignment")
+
+    # Estimate a reasonable matching tolerance from the reference sampling.
+    dt_ref = np.diff(t_ref)
+    dt_ref = dt_ref[np.isfinite(dt_ref) & (dt_ref > 0.0)]
+    if dt_ref.size == 0:
+        raise ValueError("Invalid reference timestamps for alignment")
+    period_ref = float(np.nanmedian(dt_ref))
+    if not np.isfinite(period_ref) or period_ref <= 0.0:
+        raise ValueError("Invalid reference sampling period")
+    # Nearest-neighbor without interpolation: accept matches within ~half a sample.
+    tol = 0.55 * period_ref
+
+    # For each buoy, find the nearest index in its time vector for each ref time.
+    # Keep only those ref times that match all buoys within tolerance.
+    indices_by_buoy = []
+    valid = np.ones((t_ref.size,), dtype=bool)
+    for b in per_buoy:
+        t = np.asarray(b["t"], dtype=float).reshape((-1,))
+        if t.size == 0:
+            valid[:] = False
+            indices_by_buoy.append(np.zeros_like(t_ref, dtype=int))
+            continue
+
+        j = np.searchsorted(t, t_ref, side="left")
+        j0 = np.clip(j - 1, 0, t.size - 1)
+        j1 = np.clip(j, 0, t.size - 1)
+
+        d0 = np.abs(t[j0] - t_ref)
+        d1 = np.abs(t[j1] - t_ref)
+        use1 = d1 < d0
+        idx = np.where(use1, j1, j0).astype(int)
+
+        # Enforce non-decreasing indices to avoid occasional backwards picks.
+        idx = np.maximum.accumulate(idx)
+
+        d = np.abs(t[idx] - t_ref)
+        valid &= np.isfinite(d) & (d <= tol)
+        indices_by_buoy.append(idx)
+
+    t_common = t_ref[valid]
+    if t_common.size < 2:
+        raise ValueError("Not enough aligned samples across buoys")
+
+    # Build aligned per-buoy vectors at the matched indices; assign common time grid.
+    for b, idx in zip(per_buoy, indices_by_buoy, strict=True):
+        ii = np.asarray(idx, dtype=int)[valid]
+        zin.append(np.asarray(b["z"], dtype=float)[ii])
+        uin.append(np.asarray(b["u"], dtype=float)[ii])
+        vin.append(np.asarray(b["v"], dtype=float)[ii])
+        xin.append(np.asarray(b["x"], dtype=float)[ii])
+        yin.append(np.asarray(b["y"], dtype=float)[ii])
+        tin.append(np.asarray(t_common, dtype=float))
 
     zin = np.column_stack(zin)
     uin = np.column_stack(uin)
