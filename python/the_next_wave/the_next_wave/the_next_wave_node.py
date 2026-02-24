@@ -63,12 +63,25 @@ class TheNextWaveNode(Interface):
         # WEC "actual" sample (packaged into WavePredictionOutput for external tools)
         self._wec_actual_latest = None  # dict with keys: t_s, z, u, v
 
+        # Higher-rate history of WEC actual samples for frequency/phase comparisons.
+        self.declare_parameter("wec_actual_history_sec", WINDOW_DURATION_SEC)
+        self.wec_actual_history_sec = float(self.get_parameter("wec_actual_history_sec").value)
+        if not np.isfinite(self.wec_actual_history_sec) or self.wec_actual_history_sec <= 0.0:
+            self.wec_actual_history_sec = WINDOW_DURATION_SEC
+        self._wec_actual_hist = deque()  # (t_s, z, u, v)
+
+        # Dense model predictions at target are computed over the measurement window.
+        # This parameter optionally clips them to the last N seconds.
+        self.declare_parameter("dense_prediction_window", 0.0)
+        dense_prediction_window = float(self.get_parameter("dense_prediction_window").value)
+
         self.predictor = TheNextWave(
             config=TheNextWaveConfig(
                 expected_fs=EXPECTED_FS,
                 rotation_deg=ROTATION,
                 n_te=N_TE,
                 wavespec_update_period_sec=self.wavespec_update_period_sec,
+                dense_prediction_window=dense_prediction_window,
             ),
             logger=self.get_logger(),
         )
@@ -182,6 +195,12 @@ class TheNextWaveNode(Interface):
                     "v": float(inc0.velocities.y),
                 }
                 self._wec_actual_latest = wec_sample
+
+                # Maintain a higher-rate rolling history for plotting / spectral comparison.
+                self._wec_actual_hist.append((wec_sample["t_s"], wec_sample["z"], wec_sample["u"], wec_sample["v"]))
+                t_min = wec_sample["t_s"] - float(self.wec_actual_history_sec)
+                while self._wec_actual_hist and self._wec_actual_hist[0][0] < t_min:
+                    self._wec_actual_hist.popleft()
             except Exception:
                 # Best-effort; don't break the main ingest path.
                 pass
@@ -444,9 +463,12 @@ class TheNextWaveNode(Interface):
 
         # Latest actual-at-target sample packaged alongside the prediction.
         wec = None
+        wec_series = None
         with self.data_lock:
             if self._wec_actual_latest is not None:
                 wec = dict(self._wec_actual_latest)
+            if self._wec_actual_hist:
+                wec_series = list(self._wec_actual_hist)
         if wec is not None:
             msg.has_wec_actual = True
             msg.wec_time = float(wec.get("t_s", 0.0))
@@ -459,6 +481,48 @@ class TheNextWaveNode(Interface):
             msg.wec_z = 0.0
             msg.wec_u = 0.0
             msg.wec_v = 0.0
+
+        if wec_series is not None and len(wec_series) > 0:
+            msg.has_wec_actual_series = True
+            msg.wec_series_time = [float(p[0]) for p in wec_series]
+            msg.wec_series_z = [float(p[1]) for p in wec_series]
+            msg.wec_series_u = [float(p[2]) for p in wec_series]
+            msg.wec_series_v = [float(p[3]) for p in wec_series]
+        else:
+            msg.has_wec_actual_series = False
+            msg.wec_series_time = []
+            msg.wec_series_z = []
+            msg.wec_series_u = []
+            msg.wec_series_v = []
+
+        # Dense model predictions at target over measurement timestamps
+        # (high-rate comparison series; future predictions remain unchanged).
+        if hasattr(msg, "has_dense_predictions"):
+            dense_predictions_time = np.asarray(results.get("dense_predictions_time", []), dtype=float).reshape((-1,))
+            dense_predictions_z = np.asarray(results.get("dense_predictions_z", []), dtype=float).reshape((-1,))
+            dense_predictions_u = np.asarray(results.get("dense_predictions_u", []), dtype=float).reshape((-1,))
+            dense_predictions_v = np.asarray(results.get("dense_predictions_v", []), dtype=float).reshape((-1,))
+
+            n_dp = int(
+                min(
+                    dense_predictions_time.size,
+                    dense_predictions_z.size,
+                    dense_predictions_u.size,
+                    dense_predictions_v.size,
+                )
+            )
+            if n_dp > 0:
+                msg.has_dense_predictions = True
+                msg.dense_predictions_time = dense_predictions_time[:n_dp].tolist()
+                msg.dense_predictions_z = dense_predictions_z[:n_dp].tolist()
+                msg.dense_predictions_u = dense_predictions_u[:n_dp].tolist()
+                msg.dense_predictions_v = dense_predictions_v[:n_dp].tolist()
+            else:
+                msg.has_dense_predictions = False
+                msg.dense_predictions_time = []
+                msg.dense_predictions_z = []
+                msg.dense_predictions_u = []
+                msg.dense_predictions_v = []
 
         t_pred = np.asarray(results.get("t_pred", []), dtype=float)
         z_pred = np.asarray(results.get("z_pred", []), dtype=float)

@@ -30,6 +30,13 @@ class LivePlotData:
     u_pred: np.ndarray  # (M,)
     v_pred: np.ndarray  # (M,)
 
+    # Dense target prediction over measurement timestamps (optional)
+    has_dense_predictions: bool
+    dense_predictions_time: np.ndarray  # (N,)
+    dense_predictions_z: np.ndarray  # (N,)
+    dense_predictions_u: np.ndarray  # (N,)
+    dense_predictions_v: np.ndarray  # (N,)
+
     # Streaming “actual at target”
     t_wec: Optional[float]
     z_wec: Optional[float]
@@ -42,11 +49,7 @@ class LivePlotData:
     u_wec_hist: np.ndarray  # (K2,)
     v_wec_hist: np.ndarray  # (K2,)
 
-    # History of prediction[0]
-    t_pred0_hist: np.ndarray  # (K,)
-    z_pred0_hist: np.ndarray  # (K,)
-    u_pred0_hist: np.ndarray  # (K,)
-    v_pred0_hist: np.ndarray  # (K,)
+    # (prediction[0] history removed from plots)
 
 
 class LivePlotter:
@@ -209,16 +212,30 @@ class LivePlotter:
 
         t_wec_hist = self._decimate_1d(np.asarray(d.t_wec_hist, dtype=float).ravel())
 
-        def _plot_pred(axp, y_pred, y_hist, t_wec, y_wec, y_wec_hist, ylabel: str):
+        # Dense target predictions series (optional)
+        t_nc = np.asarray(getattr(d, "dense_predictions_time", np.array([])), dtype=float).ravel()
+        z_nc = np.asarray(getattr(d, "dense_predictions_z", np.array([])), dtype=float).ravel()
+        u_nc = np.asarray(getattr(d, "dense_predictions_u", np.array([])), dtype=float).ravel()
+        v_nc = np.asarray(getattr(d, "dense_predictions_v", np.array([])), dtype=float).ravel()
+        has_nc = bool(getattr(d, "has_dense_predictions", False)) and t_nc.size and z_nc.size
+        if has_nc:
+            n_nc = int(min(t_nc.size, z_nc.size, u_nc.size, v_nc.size))
+            t_nc = self._decimate_1d(t_nc[:n_nc])
+            z_nc = self._decimate_1d(z_nc[:n_nc])
+            u_nc = self._decimate_1d(u_nc[:n_nc])
+            v_nc = self._decimate_1d(v_nc[:n_nc])
+
+        def _plot_pred(axp, y_pred, t_wec, y_wec, y_wec_hist, ylabel: str, y_nc: np.ndarray | None):
             y_pred = self._decimate_1d(np.asarray(y_pred, dtype=float).ravel())
             if t_pred.size and y_pred.size:
                 axp.plot(t_pred, y_pred, "k")
 
-            # History of prediction[0] points as they slide into the past.
-            t_hist = np.asarray(d.t_pred0_hist, dtype=float).ravel()
-            y_hist = np.asarray(y_hist, dtype=float).ravel()
-            if t_hist.size and y_hist.size:
-                axp.plot(t_hist, y_hist, ".", color="C0", markersize=6)
+            # Dense model-at-target predictions (measurement-rate).
+            if has_nc and y_nc is not None:
+                y_nc = self._decimate_1d(np.asarray(y_nc, dtype=float).ravel())
+                n = min(t_nc.size, y_nc.size)
+                if n:
+                    axp.plot(t_nc[:n], y_nc[:n], color="C2", linewidth=1.2, alpha=0.9)
 
             # History of WEC actual samples.
             y_wh = self._decimate_1d(np.asarray(y_wec_hist, dtype=float).ravel())
@@ -235,9 +252,9 @@ class LivePlotter:
 
             axp.set_ylabel(ylabel)
 
-        _plot_pred(self._ax_z_pred, d.z_pred, d.z_pred0_hist, d.t_wec, d.z_wec, d.z_wec_hist, "z pred [m]")
-        _plot_pred(self._ax_u_pred, d.u_pred, d.u_pred0_hist, d.t_wec, d.u_wec, d.u_wec_hist, "u pred [m/s]")
-        _plot_pred(self._ax_v_pred, d.v_pred, d.v_pred0_hist, d.t_wec, d.v_wec, d.v_wec_hist, "v pred [m/s]")
+        _plot_pred(self._ax_z_pred, d.z_pred, d.t_wec, d.z_wec, d.z_wec_hist, "z pred [m]", z_nc if has_nc else None)
+        _plot_pred(self._ax_u_pred, d.u_pred, d.t_wec, d.u_wec, d.u_wec_hist, "u pred [m/s]", u_nc if has_nc else None)
+        _plot_pred(self._ax_v_pred, d.v_pred, d.t_wec, d.v_wec, d.v_wec_hist, "v pred [m/s]", v_nc if has_nc else None)
         self._ax_v_pred.set_xlabel("t [s]")
 
         # Keep GUI responsive.

@@ -37,11 +37,9 @@ class TheNextWaveConfig:
     # many seconds of (measurement) time have elapsed, then refresh.
     # This can reduce CPU usage and improve warm-start stability (A0).
     wavespec_update_period_sec: float = 0.0
-    # Prediction time grid configuration.
-    # By default, match example.py behavior: 1 Hz predictions with horizon
-    # determined by target distance / phase speed.
-    prediction_dt_s: float = 1.0
-    prediction_horizon_s: float = 0.0
+    # Only compute/publish dense_predictions_* for the last N seconds of the
+    # measurement window. Set to 0 to use the full window.
+    dense_prediction_window: float = 0.0
 
 
 class TheNextWave:
@@ -168,14 +166,21 @@ class TheNextWave:
         max_target_distance = float(np.nanmax(dist))
         leadtime = float(max_target_distance / ce) if ce and np.isfinite(ce) else 0.0
 
-        n_lead = int(np.floor(leadtime))
+        # Match example.py behavior: 1 Hz predictions with horizon determined
+        # by target distance / phase speed.
+        n_lead = int(np.floor(leadtime)) if np.isfinite(leadtime) and leadtime > 0.0 else 1
         if n_lead < 1:
             n_lead = 1
+
+        # Avoid pathological message sizes.
+        max_pred_points = 5000
+        if n_lead > max_pred_points:
+            n_lead = max_pred_points
 
         t_start = float(np.nanmin(tin[input_slice, :]))
         t_end = float(np.nanmax(tin[input_slice, :]))
 
-        # example.py: tpred = t_end + arange(1, n_lead+1)
+        # example.py uses 1 Hz predictions: tpred = t_end + arange(1, n_lead+1)
         tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
         xpred = np.full_like(tpred, x_target, dtype=float)
         ypred = np.full_like(tpred, y_target, dtype=float)
@@ -206,6 +211,74 @@ class TheNextWave:
         uout = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(zout)
         vout = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(zout)
 
+        # Dense model evaluation at the target (WEC) for measurement timestamps.
+        # This provides high-rate model-vs-actual comparison without changing the
+        # future prediction time grid.
+        t_now = np.asarray(tin[input_slice, :], dtype=float)
+        if t_now.ndim == 2 and t_now.shape[1] > 0:
+            t_now = t_now[:, 0]
+        t_now = t_now.reshape((-1,))
+
+        # Optionally clip dense predictions to the last N seconds of the window.
+        dpw = float(self.config.dense_prediction_window) if np.isfinite(self.config.dense_prediction_window) else 0.0
+        if dpw > 0.0 and t_now.size and np.all(np.isfinite(t_now)):
+            t_end_now = float(np.nanmax(t_now))
+            t_min_now = t_end_now - dpw
+            keep = t_now >= t_min_now
+            if np.any(keep):
+                t_now = t_now[keep]
+
+        dense_predictions_time = np.array([], dtype=float)
+        dense_predictions_z = np.array([], dtype=float)
+        dense_predictions_u = np.array([], dtype=float)
+        dense_predictions_v = np.array([], dtype=float)
+
+        try:
+            kx = np.asarray(getattr(params, "kx", np.array([])), dtype=float).reshape((-1,))
+            ky = np.asarray(getattr(params, "ky", np.array([])), dtype=float).reshape((-1,))
+            omega = np.asarray(getattr(params, "omega", np.array([])), dtype=float).reshape((-1,))
+            A = np.asarray(getattr(params, "A", np.array([])), dtype=float).reshape((-1,))
+            ncomp = int(kx.size)
+            if ncomp > 0 and A.size == 2 * ncomp and t_now.size > 0:
+                x = np.full((t_now.size, 1), float(x_target), dtype=float)
+                y = np.full((t_now.size, 1), float(y_target), dtype=float)
+                t = t_now.reshape((-1, 1))
+
+                kx_row = kx.reshape((1, -1))
+                ky_row = ky.reshape((1, -1))
+                om_row = omega.reshape((1, -1))
+
+                phi = x * kx_row + y * ky_row - t * om_row
+                c = np.cos(phi)
+                s = np.sin(phi)
+
+                Ac = A[:ncomp]
+                As = A[ncomp:]
+
+                z_nc = (c @ Ac) + (s @ As)
+                u_nc = np.zeros_like(z_nc)
+                v_nc = np.zeros_like(z_nc)
+
+                if bool(getattr(params, "use_vel", False)):
+                    kn = np.sqrt(kx * kx + ky * ky)
+                    kn[kn == 0.0] = np.nan
+                    cu = (kx / kn) * omega
+                    cv = (ky / kn) * omega
+                    cu = np.nan_to_num(cu, nan=0.0, posinf=0.0, neginf=0.0)
+                    cv = np.nan_to_num(cv, nan=0.0, posinf=0.0, neginf=0.0)
+                    cu_row = cu.reshape((1, -1))
+                    cv_row = cv.reshape((1, -1))
+                    u_nc = (c * cu_row) @ Ac + (s * cu_row) @ As
+                    v_nc = (c * cv_row) @ Ac + (s * cv_row) @ As
+
+                dense_predictions_time = t_now
+                dense_predictions_z = z_nc.reshape((-1,))
+                dense_predictions_u = u_nc.reshape((-1,))
+                dense_predictions_v = v_nc.reshape((-1,))
+        except Exception:
+            # Best-effort: dense predictions are optional.
+            pass
+
         nbuoys = int(zin.shape[1])
         reconstruction = np.asarray(recon_vec).reshape((win_len, -1), order="F")
         zr = reconstruction[:, 0:nbuoys]
@@ -235,6 +308,10 @@ class TheNextWave:
                 "z_pred": zout,
                 "u_pred": uout,
                 "v_pred": vout,
+                "dense_predictions_time": dense_predictions_time,
+                "dense_predictions_z": dense_predictions_z,
+                "dense_predictions_u": dense_predictions_u,
+                "dense_predictions_v": dense_predictions_v,
                 "t_meas": tin[input_slice, :],
                 "x_meas": xin[input_slice, :],
                 "y_meas": yin[input_slice, :],

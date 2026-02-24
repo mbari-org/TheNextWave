@@ -39,7 +39,7 @@ class TheNextWavePlotterNode(Node):
 
         self.declare_parameter("prediction_topic", "wave_predictions")
         self.declare_parameter("max_points", 600)
-        self.declare_parameter("history_sec", 600.0)
+        self.declare_parameter("history_sec", 100.0)
 
         prediction_topic = str(self.get_parameter("prediction_topic").value)
         max_points = int(self.get_parameter("max_points").value)
@@ -56,8 +56,8 @@ class TheNextWavePlotterNode(Node):
         self._latest: Optional[WavePredictionOutput] = None
         self._dirty = False
 
-        # Rolling history for the “first predicted point” and WEC actual samples
-        self._pred0_hist = deque()  # (t, z, u, v)
+        # Rolling history for WEC actual samples.
+        # If a full WEC time series is carried in the message, we plot that directly.
         self._wec_hist = deque()  # (t, z, u, v)
 
         self._sub = self.create_subscription(
@@ -118,11 +118,35 @@ class TheNextWavePlotterNode(Node):
         u_pred = np.array([float(p.vel_east) for p in msg.predictions], dtype=float)
         v_pred = np.array([float(p.vel_north) for p in msg.predictions], dtype=float)
 
-        # Maintain rolling histories
-        if t_pred.size:
-            self._pred0_hist.append((float(t_pred[0]), float(z_pred[0]), float(u_pred[0]), float(v_pred[0])))
+        # Dense target predictions series (optional)
+        has_dense_predictions = bool(getattr(msg, "has_dense_predictions", False))
+        dense_predictions_time = np.asarray(getattr(msg, "dense_predictions_time", []), dtype=float)
+        dense_predictions_z = np.asarray(getattr(msg, "dense_predictions_z", []), dtype=float)
+        dense_predictions_u = np.asarray(getattr(msg, "dense_predictions_u", []), dtype=float)
+        dense_predictions_v = np.asarray(getattr(msg, "dense_predictions_v", []), dtype=float)
+        n_dp = int(
+            min(
+                dense_predictions_time.size,
+                dense_predictions_z.size,
+                dense_predictions_u.size,
+                dense_predictions_v.size,
+            )
+        )
+        if n_dp <= 0:
+            has_dense_predictions = False
+            dense_predictions_time = np.array([], dtype=float)
+            dense_predictions_z = np.array([], dtype=float)
+            dense_predictions_u = np.array([], dtype=float)
+            dense_predictions_v = np.array([], dtype=float)
+        else:
+            dense_predictions_time = dense_predictions_time[:n_dp]
+            dense_predictions_z = dense_predictions_z[:n_dp]
+            dense_predictions_u = dense_predictions_u[:n_dp]
+            dense_predictions_v = dense_predictions_v[:n_dp]
 
-        if bool(msg.has_wec_actual):
+        use_msg_series = bool(getattr(msg, "has_wec_actual_series", False)) and len(getattr(msg, "wec_series_time", [])) > 0
+        if not use_msg_series and bool(msg.has_wec_actual):
+            # Backward-compatible fallback: single sample per message.
             self._wec_hist.append((float(msg.wec_time), float(msg.wec_z), float(msg.wec_u), float(msg.wec_v)))
 
         # Trim histories
@@ -133,20 +157,19 @@ class TheNextWavePlotterNode(Node):
             t_ref = float(t_pred[-1])
         if t_ref is not None and np.isfinite(t_ref):
             t_min = t_ref - float(self._history_sec)
-            while self._pred0_hist and self._pred0_hist[0][0] < t_min:
-                self._pred0_hist.popleft()
             while self._wec_hist and self._wec_hist[0][0] < t_min:
                 self._wec_hist.popleft()
 
-        t_pred0_hist = np.array([p[0] for p in self._pred0_hist], dtype=float) if self._pred0_hist else np.array([], dtype=float)
-        z_pred0_hist = np.array([p[1] for p in self._pred0_hist], dtype=float) if self._pred0_hist else np.array([], dtype=float)
-        u_pred0_hist = np.array([p[2] for p in self._pred0_hist], dtype=float) if self._pred0_hist else np.array([], dtype=float)
-        v_pred0_hist = np.array([p[3] for p in self._pred0_hist], dtype=float) if self._pred0_hist else np.array([], dtype=float)
-
-        t_wec_hist = np.array([p[0] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-        z_wec_hist = np.array([p[1] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-        u_wec_hist = np.array([p[2] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-        v_wec_hist = np.array([p[3] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
+        if use_msg_series:
+            t_wec_hist = np.asarray(getattr(msg, "wec_series_time", []), dtype=float)
+            z_wec_hist = np.asarray(getattr(msg, "wec_series_z", []), dtype=float)
+            u_wec_hist = np.asarray(getattr(msg, "wec_series_u", []), dtype=float)
+            v_wec_hist = np.asarray(getattr(msg, "wec_series_v", []), dtype=float)
+        else:
+            t_wec_hist = np.array([p[0] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
+            z_wec_hist = np.array([p[1] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
+            u_wec_hist = np.array([p[2] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
+            v_wec_hist = np.array([p[3] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
 
         t_wec = float(msg.wec_time) if bool(msg.has_wec_actual) else None
         z_wec = float(msg.wec_z) if bool(msg.has_wec_actual) else None
@@ -169,6 +192,11 @@ class TheNextWavePlotterNode(Node):
             z_pred=z_pred,
             u_pred=u_pred,
             v_pred=v_pred,
+            has_dense_predictions=has_dense_predictions,
+            dense_predictions_time=dense_predictions_time,
+            dense_predictions_z=dense_predictions_z,
+            dense_predictions_u=dense_predictions_u,
+            dense_predictions_v=dense_predictions_v,
             t_wec=t_wec,
             z_wec=z_wec,
             u_wec=u_wec,
@@ -177,10 +205,6 @@ class TheNextWavePlotterNode(Node):
             z_wec_hist=z_wec_hist,
             u_wec_hist=u_wec_hist,
             v_wec_hist=v_wec_hist,
-            t_pred0_hist=t_pred0_hist,
-            z_pred0_hist=z_pred0_hist,
-            u_pred0_hist=u_pred0_hist,
-            v_pred0_hist=v_pred0_hist,
         )
 
         try:
