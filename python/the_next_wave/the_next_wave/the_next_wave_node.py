@@ -7,9 +7,11 @@ The core algorithmic pipeline is implemented in `the_next_wave.the_next_wave.The
 """
 
 from collections import OrderedDict, deque
+import socket
 import threading
 import traceback
 import time
+from typing import Optional
 
 import numpy as np
 
@@ -22,6 +24,8 @@ from buoy_api.interface import Interface
 from buoy_interfaces.msg import XBRecord
 from buoy_interfaces.msg import WavePredictionOutput, WavePredictionPoint
 from the_next_wave import TheNextWave, TheNextWaveConfig
+from the_next_wave import sbgMessageParse
+from the_next_wave.readAndDecodeFromEthernetBridge import iter_sbg_headers
 from the_next_wave.swift import SBGData, SWIFTArray
 from the_next_wave.utilities import generic_coordinate_transform_inverse
 
@@ -57,18 +61,18 @@ class TheNextWaveNode(Interface):
         # (in measurement time), reusing the last valid wavespec in between.
         self.declare_parameter("wavespec_update_period_sec", 0.0)
         self.wavespec_update_period_sec = float(self.get_parameter("wavespec_update_period_sec").value)
-        self._last_accept_t_us_by_swift: dict[int, float] = {}
-        self._last_seen_t_us_by_swift: dict[int, float] = {}
+        self.last_accept_t_us_by_swift: dict[int, float] = {}
+        self.last_seen_t_us_by_swift: dict[int, float] = {}
 
         # WEC "actual" sample (packaged into WavePredictionOutput for external tools)
-        self._wec_actual_latest = None  # dict with keys: t_s, z, u, v
+        self.wec_actual_latest = None  # dict with keys: t_s, z, u, v
 
         # Higher-rate history of WEC actual samples for frequency/phase comparisons.
         self.declare_parameter("wec_actual_history_sec", WINDOW_DURATION_SEC)
         self.wec_actual_history_sec = float(self.get_parameter("wec_actual_history_sec").value)
         if not np.isfinite(self.wec_actual_history_sec) or self.wec_actual_history_sec <= 0.0:
             self.wec_actual_history_sec = WINDOW_DURATION_SEC
-        self._wec_actual_hist = deque()  # (t_s, z, u, v)
+        self.wec_actual_hist = deque()  # (t_s, z, u, v)
 
         # Dense model predictions at target are computed over the measurement window.
         # This parameter optionally clips them to the last N seconds.
@@ -88,14 +92,69 @@ class TheNextWaveNode(Interface):
 
         self.data_lock = threading.Lock()
         self.processing = False
-        self._last_wavespec_warn_walltime = 0.0
+        self.last_wavespec_warn_walltime = 0.0
+
+        # Optional: ingest raw SBG data via TCP (Ethernet bridge).
+        # This runs in parallel with any ROS subscriptions.
+        self.declare_parameter("sbg_bridge_enable", False)
+        self.declare_parameter("sbg_bridge_bind", "0.0.0.0")
+        self.declare_parameter("sbg_bridge_port_base", 3001)
+        self.declare_parameter("sbg_bridge_socket_timeout_sec", 1.0)
+        self.sbg_bridge_enable = bool(self.get_parameter("sbg_bridge_enable").value)
+        self.sbg_bridge_bind = str(self.get_parameter("sbg_bridge_bind").value)
+        self.sbg_bridge_port_base = int(self.get_parameter("sbg_bridge_port_base").value)
+        self.sbg_bridge_socket_timeout_sec = float(self.get_parameter("sbg_bridge_socket_timeout_sec").value)
+        if not np.isfinite(self.sbg_bridge_socket_timeout_sec) or self.sbg_bridge_socket_timeout_sec <= 0.0:
+            self.sbg_bridge_socket_timeout_sec = 1.0
+
+        # Optional: when ingesting raw SBG via the TCP bridge without Gazebo/WEC topics,
+        # replicate the coordinate frame and target location from example.py.
+        self.declare_parameter("sbg_bridge_use_example_frame", False)
+        self.declare_parameter("example_latorigin", 41.6878)
+        self.declare_parameter("example_lonorigin", -9.0545)
+        self.declare_parameter("example_rotation_deg", 180.0)
+        self.declare_parameter("example_xtarget", 200.0)
+        self.declare_parameter("example_ytarget", 200.0)
+        self.sbg_use_example_frame = bool(self.get_parameter("sbg_bridge_use_example_frame").value)
+        self.example_latorigin = float(self.get_parameter("example_latorigin").value)
+        self.example_lonorigin = float(self.get_parameter("example_lonorigin").value)
+        self.example_rotation_deg = float(self.get_parameter("example_rotation_deg").value)
+        self.example_xtarget = float(self.get_parameter("example_xtarget").value)
+        self.example_ytarget = float(self.get_parameter("example_ytarget").value)
+        if not np.isfinite(self.example_latorigin):
+            self.example_latorigin = 41.6878
+        if not np.isfinite(self.example_lonorigin):
+            self.example_lonorigin = -9.0545
+        if not np.isfinite(self.example_rotation_deg):
+            self.example_rotation_deg = 180.0
+        if not np.isfinite(self.example_xtarget):
+            self.example_xtarget = 200.0
+        if not np.isfinite(self.example_ytarget):
+            self.example_ytarget = 200.0
+
+        self.sbg_bridge_stop_event = threading.Event()
+        self.sbg_bridge_threads: list[threading.Thread] = []
+        self.sbg_partial_by_swift: dict[int, "OrderedDict[int, dict]"] = {}
+        self.last_sbg_bridge_warn_walltime_by_swift: dict[int, float] = {}
 
         # WEC buoy pose for prediction target (set by ahrs_callback)
         self.wec_lat = None
         self.wec_lon = None
 
         self.set_params()
-        self.use_sim_time()
+        if not self.sbg_bridge_enable:
+            self.use_sim_time()
+
+        if self.sbg_bridge_enable and self.sbg_use_example_frame:
+            self.predictor.lat_origin = float(self.example_latorigin)
+            self.predictor.lon_origin = float(self.example_lonorigin)
+            self.predictor.config.rotation_deg = float(self.example_rotation_deg)
+            self.get_logger().info(
+                "SBG bridge example-frame override enabled: "
+                f"origin=({self.example_latorigin:.6f},{self.example_lonorigin:.6f}) "
+                f"rotation_deg={self.example_rotation_deg:.3f} "
+                f"target_xy=({self.example_xtarget:.1f},{self.example_ytarget:.1f})"
+            )
 
         # Track window readiness only for configured buoys
         configured_swift_nums = [int(name[-2:]) for name in self.swift_idx.keys()]
@@ -107,10 +166,230 @@ class TheNextWaveNode(Interface):
 
         self.pred_publisher = self.create_publisher(WavePredictionOutput, "wave_predictions", 10)
 
+        if self.sbg_bridge_enable:
+            swift_nums = [int(name[-2:]) for name in self.swift_idx.keys()] or list(range(22, 26))
+            self.start_sbg_bridge_servers(swift_nums)
+
         self.process_timer = self.create_timer(
             PROCESSING_INTERVAL_SEC,
             self.process_timer_callback,
         )
+
+    def destroy_node(self):
+        try:
+            self.sbg_bridge_stop_event.set()
+        except Exception:
+            pass
+        return super().destroy_node()
+
+    def start_sbg_bridge_servers(self, swift_nums: list[int]) -> None:
+        # One connection per SWIFT buoy; bind ports consecutively from port_base.
+        for swift_num in swift_nums:
+            port = int(self.sbg_bridge_port_base) + int(swift_num) - 22
+            thread = threading.Thread(
+                target=self.sbg_bridge_server_thread,
+                args=(int(swift_num), str(self.sbg_bridge_bind), int(port)),
+                daemon=True,
+            )
+            self.sbg_bridge_threads.append(thread)
+            thread.start()
+            self.get_logger().info(f"SBG bridge starting: swift{swift_num} bind {self.sbg_bridge_bind}:{port}")
+
+    def sbg_bridge_server_thread(self, swift_num: int, bind: str, port: int) -> None:
+        server_sock: Optional[socket.socket] = None
+        try:
+            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                server_sock.bind((bind, port))
+            except OSError as e:
+                if getattr(e, "errno", None) == 98:
+                    self.get_logger().error(
+                        f"swift{swift_num} SBG bridge bind failed on {bind}:{port} (address in use). "
+                        f"Stop the other process or change sbg_bridge_port_base."
+                    )
+                    return
+                raise
+            server_sock.listen(1)
+            server_sock.settimeout(self.sbg_bridge_socket_timeout_sec)
+
+            self.get_logger().info(f"swift{swift_num} SBG bridge listening on {bind}:{port}")
+
+            while rclpy.ok() and not self.sbg_bridge_stop_event.is_set():
+                try:
+                    conn, client_addr = server_sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    # Socket likely closed during shutdown
+                    break
+
+                try:
+                    self.get_logger().info(f"swift{swift_num} SBG bridge connection from {client_addr}")
+                    conn.settimeout(self.sbg_bridge_socket_timeout_sec)
+                    self.sbg_bridge_connection_loop(swift_num, conn)
+                except Exception:
+                    self.get_logger().warn(f"swift{swift_num} SBG bridge connection ended")
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        except Exception:
+            self.get_logger().error(f"swift{swift_num} SBG bridge server failed on {bind}:{port}")
+            self.get_logger().error(traceback.format_exc())
+        finally:
+            if server_sock is not None:
+                try:
+                    server_sock.close()
+                except Exception:
+                    pass
+
+    def sbg_bridge_connection_loop(self, swift_num: int, conn: socket.socket) -> None:
+        # Scan for sync/header bytes, then parse payloads via sbgMessageParse.
+        for msg_id, msg_class in iter_sbg_headers(conn, stop_event=self.sbg_bridge_stop_event):
+            if not (rclpy.ok() and not self.sbg_bridge_stop_event.is_set()):
+                break
+
+            try:
+                data_struct = sbgMessageParse.parseSbgMessage(
+                    msg_class,
+                    msg_id,
+                    connection=conn,
+                    printFlag=False,
+                )
+            except Exception:
+                now = time.monotonic()
+                last = float(self.last_sbg_bridge_warn_walltime_by_swift.get(swift_num, 0.0))
+                if now - last > 5.0:
+                    self.last_sbg_bridge_warn_walltime_by_swift[swift_num] = now
+                    self.get_logger().warn(f"swift{swift_num} SBG bridge parse error (continuing)")
+                continue
+
+            if data_struct is None:
+                continue
+
+            self.handle_sbg_bridge_message(swift_num, msg_id, data_struct)
+
+    def handle_sbg_bridge_message(self, swift_num: int, msg_id: bytes, data_struct: dict) -> None:
+        # We only need a minimal subset to fill SBG windows:
+        #   ShipMotion (0x09): time_stamp, heave
+        #   GpsVel (0x0d): time_stamp, vel_e, vel_n
+        #   GpsPos (0x0e): time_stamp, lat, long
+        try:
+            t_us = int(data_struct.get("time_stamp"))
+        except Exception:
+            return
+
+        with self.data_lock:
+            partial = self.sbg_partial_by_swift.setdefault(swift_num, OrderedDict())
+            rec = partial.get(t_us)
+            if rec is None:
+                rec = {"t_us": t_us}
+                partial[t_us] = rec
+
+            if msg_id == b"\x09":  # ShipMotion
+                try:
+                    rec["z"] = float(data_struct.get("heave"))
+                except Exception:
+                    pass
+            elif msg_id == b"\x0d":  # GpsVel
+                try:
+                    rec["u"] = float(data_struct.get("vel_e"))
+                    rec["v"] = float(data_struct.get("vel_n"))
+                except Exception:
+                    pass
+            elif msg_id == b"\x0e":  # GpsPos
+                try:
+                    rec["lat"] = float(data_struct.get("lat"))
+                    rec["lon"] = float(data_struct.get("long"))
+                except Exception:
+                    pass
+
+            if all(k in rec for k in ("z", "u", "v", "lat", "lon")):
+                self.ingest_swift_sample_locked(
+                    swift_num=swift_num,
+                    t_us=float(rec["t_us"]),
+                    z=float(rec["z"]),
+                    u=float(rec["u"]),
+                    v=float(rec["v"]),
+                    lat=float(rec["lat"]),
+                    lon=float(rec["lon"]),
+                )
+                try:
+                    del partial[t_us]
+                except Exception:
+                    pass
+
+            # Keep the partial map bounded in case of missing message types.
+            while len(partial) > 100:
+                try:
+                    partial.popitem(last=False)
+                except Exception:
+                    break
+
+    def ingest_swift_sample_locked(
+        self,
+        *,
+        swift_num: int,
+        t_us: float,
+        z: float,
+        u: float,
+        v: float,
+        lat: float,
+        lon: float,
+    ) -> None:
+        sbg = getattr(self.swifts, f"sbg{swift_num}")
+
+        last_seen_t_us = self.last_seen_t_us_by_swift.get(swift_num)
+        # Detect timestamp regressions (e.g., sim-time reset / /clock jump).
+        # Use a small tolerance to avoid false positives from float rounding.
+        if last_seen_t_us is not None and t_us < (last_seen_t_us - 1.0):
+            dt_us = t_us - last_seen_t_us
+            self.get_logger().warn(
+                f"Time jumped backwards for swift{swift_num}: "
+                f"prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)"
+            )
+            # Drop all pre-jump samples so timestamps remain monotonic.
+            self.reset_swift_window(swift_num)
+            sbg = getattr(self.swifts, f"sbg{swift_num}")
+
+        # Detect large forward jumps (e.g., sim pause/resume or clock discontinuity)
+        # that will effectively invalidate the rolling 256s window.
+        if last_seen_t_us is not None and (t_us - last_seen_t_us) > (WINDOW_DURATION_SEC * 1e6):
+            dt_us = t_us - last_seen_t_us
+            self.get_logger().warn(
+                f"Time jumped forwards for swift{swift_num}: "
+                f"prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)"
+            )
+            self.reset_swift_window(swift_num)
+            sbg = getattr(self.swifts, f"sbg{swift_num}")
+
+        self.last_seen_t_us_by_swift[swift_num] = t_us
+
+        if self.downsample_to_hz > 0.0:
+            min_dt_us = 1e6 / self.downsample_to_hz
+            last_t_us = self.last_accept_t_us_by_swift.get(swift_num)
+            if last_t_us is not None and (t_us - last_t_us) < min_dt_us:
+                return
+            self.last_accept_t_us_by_swift[swift_num] = t_us
+
+        sbg.ShipMotion.time_stamp.append(t_us)
+        sbg.ShipMotion.heave.append(z)
+
+        sbg.GpsVel.time_stamp.append(t_us)
+        sbg.GpsVel.vel_e.append(u)
+        sbg.GpsVel.vel_n.append(v)
+
+        sbg.GpsPos.time_stamp.append(t_us)
+        sbg.GpsPos.lat.append(float(lat))
+        sbg.GpsPos.long.append(float(lon))
+
+        self.maintain_sbg_window(sbg, t_us, swift_num)
+
+        if self.last_process_time_us is None:
+            self.last_process_time_us = t_us
 
     def reset_swift_window(self, swift_num: int) -> None:
         """Drop accumulated samples for a SWIFT and reset readiness state.
@@ -135,7 +414,7 @@ class TheNextWaveNode(Interface):
         self.window_ready = bool(self.window_ready_by_swift) and all(self.window_ready_by_swift.values())
 
         # Also reset downsampling state so the first post-jump sample is accepted.
-        self._last_accept_t_us_by_swift.pop(swift_num, None)
+        self.last_accept_t_us_by_swift.pop(swift_num, None)
 
     def init_sbg_windows(self):
         for sid in range(22, 26):
@@ -194,13 +473,13 @@ class TheNextWaveNode(Interface):
                     "u": float(inc0.velocities.x),
                     "v": float(inc0.velocities.y),
                 }
-                self._wec_actual_latest = wec_sample
+                self.wec_actual_latest = wec_sample
 
                 # Maintain a higher-rate rolling history for plotting / spectral comparison.
-                self._wec_actual_hist.append((wec_sample["t_s"], wec_sample["z"], wec_sample["u"], wec_sample["v"]))
+                self.wec_actual_hist.append((wec_sample["t_s"], wec_sample["z"], wec_sample["u"], wec_sample["v"]))
                 t_min = wec_sample["t_s"] - float(self.wec_actual_history_sec)
-                while self._wec_actual_hist and self._wec_actual_hist[0][0] < t_min:
-                    self._wec_actual_hist.popleft()
+                while self.wec_actual_hist and self.wec_actual_hist[0][0] < t_min:
+                    self.wec_actual_hist.popleft()
             except Exception:
                 # Best-effort; don't break the main ingest path.
                 pass
@@ -208,48 +487,7 @@ class TheNextWaveNode(Interface):
             for swift_name, swift_idx in self.swift_idx.items():
                 swift_num = int(swift_name[-2:])
                 inc = data.inc_wave_heights[swift_idx]
-                sbg = getattr(self.swifts, f"sbg{swift_num}")
-
                 t_us = inc.pose.header.stamp.sec * 1e6 + inc.pose.header.stamp.nanosec / 1e3
-
-                last_seen_t_us = self._last_seen_t_us_by_swift.get(swift_num)
-                # Detect timestamp regressions (e.g., sim-time reset / /clock jump).
-                # Use a small tolerance to avoid false positives from float rounding.
-                if last_seen_t_us is not None and t_us < (last_seen_t_us - 1.0):
-                    dt_us = t_us - last_seen_t_us
-                    self.get_logger().warn(
-                        f"Time jumped backwards for swift{swift_num}: "
-                        f"prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)"
-                    )
-                    # Drop all pre-jump samples so timestamps remain monotonic.
-                    self.reset_swift_window(swift_num)
-                    # Refresh reference after reset (lists were cleared).
-                    sbg = getattr(self.swifts, f"sbg{swift_num}")
-                # Detect large forward jumps (e.g., sim pause/resume or clock discontinuity)
-                # that will effectively invalidate the rolling 256s window.
-                if last_seen_t_us is not None and (t_us - last_seen_t_us) > (WINDOW_DURATION_SEC * 1e6):
-                    dt_us = t_us - last_seen_t_us
-                    self.get_logger().warn(
-                        f"Time jumped forwards for swift{swift_num}: "
-                        f"prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)"
-                    )
-                    self.reset_swift_window(swift_num)
-                    sbg = getattr(self.swifts, f"sbg{swift_num}")
-                self._last_seen_t_us_by_swift[swift_num] = t_us
-
-                if self.downsample_to_hz > 0.0:
-                    min_dt_us = 1e6 / self.downsample_to_hz
-                    last_t_us = self._last_accept_t_us_by_swift.get(swift_num)
-                    if last_t_us is not None and (t_us - last_t_us) < min_dt_us:
-                        continue
-                    self._last_accept_t_us_by_swift[swift_num] = t_us
-
-                sbg.ShipMotion.time_stamp.append(t_us)
-                sbg.ShipMotion.heave.append(inc.pose.pose.position.z)
-
-                sbg.GpsVel.time_stamp.append(t_us)
-                sbg.GpsVel.vel_e.append(inc.velocities.x)
-                sbg.GpsVel.vel_n.append(inc.velocities.y)
 
                 lat_ref = inc.gps_ref.latitude
                 lon_ref = inc.gps_ref.longitude
@@ -257,14 +495,16 @@ class TheNextWaveNode(Interface):
                 y = inc.pose.pose.position.y
 
                 lat, lon = generic_coordinate_transform_inverse(x, y, lat_ref, lon_ref, ROTATION)
-                sbg.GpsPos.time_stamp.append(t_us)
-                sbg.GpsPos.lat.append(float(lat))
-                sbg.GpsPos.long.append(float(lon))
 
-                self.maintain_sbg_window(sbg, t_us, swift_num)
-
-                if self.last_process_time_us is None:
-                    self.last_process_time_us = t_us
+                self.ingest_swift_sample_locked(
+                    swift_num=swift_num,
+                    t_us=float(t_us),
+                    z=float(inc.pose.pose.position.z),
+                    u=float(inc.velocities.x),
+                    v=float(inc.velocities.y),
+                    lat=float(lat),
+                    lon=float(lon),
+                )
 
     def maintain_sbg_window(self, sbg: SBGData, current_t_us: float, swift_num: int):
         window_us = WINDOW_DURATION_SEC * 1e6
@@ -361,6 +601,26 @@ class TheNextWaveNode(Interface):
                 wec_lat = self.wec_lat
                 wec_lon = self.wec_lon
 
+            if (
+                (wec_lat is None or wec_lon is None)
+                and self.sbg_bridge_enable
+                and self.sbg_use_example_frame
+            ):
+                try:
+                    lat, lon = generic_coordinate_transform_inverse(
+                        self.example_xtarget,
+                        self.example_ytarget,
+                        self.example_latorigin,
+                        self.example_lonorigin,
+                        self.example_rotation_deg,
+                    )
+                    wec_lat = float(np.asarray(lat).reshape((-1,))[0])
+                    wec_lon = float(np.asarray(lon).reshape((-1,))[0])
+                except Exception:
+                    # Best-effort; predictor will fall back to (0,0) target.
+                    wec_lat = None
+                    wec_lon = None
+
             results = self.predictor.process(swifts_snapshot, wec_lat=wec_lat, wec_lon=wec_lon)
             self.publish_prediction(results)
 
@@ -369,8 +629,8 @@ class TheNextWaveNode(Interface):
             msg = str(e)
             if "No usable wavespec available yet" in msg:
                 now = time.monotonic()
-                if now - self._last_wavespec_warn_walltime > 5.0:
-                    self._last_wavespec_warn_walltime = now
+                if now - self.last_wavespec_warn_walltime > 5.0:
+                    self.last_wavespec_warn_walltime = now
                     self.get_logger().warn(msg)
             else:
                 self.get_logger().error(f"Background wave processing failed: {e}")
@@ -465,10 +725,10 @@ class TheNextWaveNode(Interface):
         wec = None
         wec_series = None
         with self.data_lock:
-            if self._wec_actual_latest is not None:
-                wec = dict(self._wec_actual_latest)
-            if self._wec_actual_hist:
-                wec_series = list(self._wec_actual_hist)
+            if self.wec_actual_latest is not None:
+                wec = dict(self.wec_actual_latest)
+            if self.wec_actual_hist:
+                wec_series = list(self.wec_actual_hist)
         if wec is not None:
             msg.has_wec_actual = True
             msg.wec_time = float(wec.get("t_s", 0.0))

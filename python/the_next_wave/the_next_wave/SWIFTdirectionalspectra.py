@@ -52,7 +52,7 @@ def SWIFTdirectionalspectra(
     df = np.median(np.diff(f))
 
     # get spectral arrays (try to coerce to 1D frequency arrays)
-    def _to_1d(arr):
+    def to_1d(arr):
         a = np.asarray(arr)
         if a.size == 0:
             return a.ravel()
@@ -65,11 +65,11 @@ def SWIFTdirectionalspectra(
             return np.nanmean(a, axis=0)
         return a
 
-    energy = _to_1d(SWIFT.wavespectra.energy)
-    a1_i = _to_1d(SWIFT.wavespectra.a1)
-    a2_i = _to_1d(SWIFT.wavespectra.a2)
-    b1_i = _to_1d(SWIFT.wavespectra.b1)
-    b2_i = _to_1d(SWIFT.wavespectra.b2)
+    energy = to_1d(SWIFT.wavespectra.energy)
+    a1_i = to_1d(SWIFT.wavespectra.a1)
+    a2_i = to_1d(SWIFT.wavespectra.a2)
+    b1_i = to_1d(SWIFT.wavespectra.b1)
+    b2_i = to_1d(SWIFT.wavespectra.b2)
 
     # replace 9999 and NaN with zero as in MATLAB
     energy = np.where((energy == 9999) | np.isnan(energy), 0.0, energy)

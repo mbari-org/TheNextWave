@@ -10,6 +10,92 @@ from .swift import SWIFTArray, WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 
 
+def as_1d(a) -> np.ndarray:
+    return np.asarray(a, dtype=float).reshape((-1,))
+
+
+def select_sbg_burst_struct(sbg_data, prefer_longest: bool = True):
+    """Select a single raw SBG burst struct from a MATLAB-loaded `sbgData`."""
+    try:
+        size = int(getattr(sbg_data, "size", 1))
+    except Exception:
+        size = 1
+
+    if size <= 1:
+        return sbg_data
+
+    if not prefer_longest:
+        try:
+            return sbg_data[0]
+        except Exception:
+            return sbg_data
+
+    best = None
+    best_n = -1
+    for i in range(size):
+        try:
+            cand = sbg_data[i]
+            t = as_1d(getattr(getattr(cand, "ShipMotion"), "time_stamp"))
+            n = int(t.size)
+        except Exception:
+            continue
+
+        if n > best_n:
+            best_n = n
+            best = cand
+
+    return best if best is not None else sbg_data
+
+
+def load_raw_sbg_arrays(
+    sbg,
+    *,
+    start_index: int = 0,
+    end_index: int | None = None,
+):
+    """Extract aligned raw arrays from one SBG burst struct.
+
+    Returns arrays in the raw SWIFT / SBG coordinate conventions.
+
+    Outputs
+    -------
+    t_us : ndarray (N,)
+        Raw SBG time_stamp values (microseconds)
+    heave : ndarray (N,)
+    vel_e : ndarray (N,)
+    vel_n : ndarray (N,)
+    lat : ndarray (N,)
+    lon : ndarray (N,)
+    """
+    t_us = as_1d(getattr(getattr(sbg, "ShipMotion"), "time_stamp"))
+    heave = as_1d(getattr(getattr(sbg, "ShipMotion"), "heave"))
+    vel_e = as_1d(getattr(getattr(sbg, "GpsVel"), "vel_e"))
+    vel_n = as_1d(getattr(getattr(sbg, "GpsVel"), "vel_n"))
+    lat = as_1d(getattr(getattr(sbg, "GpsPos"), "lat"))
+    lon = as_1d(getattr(getattr(sbg, "GpsPos"), "long"))
+
+    n = int(min(t_us.size, heave.size, vel_e.size, vel_n.size, lat.size, lon.size))
+    if n <= 0:
+        raise ValueError("No usable samples in SBG burst")
+
+    start = max(0, int(start_index))
+    stop = n if end_index is None else int(end_index)
+    if stop < 0 or stop > n:
+        stop = n
+    if start >= stop:
+        raise ValueError(f"Invalid start/end: {start}..{stop} (n={n})")
+
+    sl = slice(start, stop)
+    return (
+        np.asarray(t_us[sl]),
+        np.asarray(heave[sl]),
+        np.asarray(vel_e[sl]),
+        np.asarray(vel_n[sl]),
+        np.asarray(lat[sl]),
+        np.asarray(lon[sl]),
+    )
+
+
 def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
     """
     Convert lat/lon coordinates to local x/y using UTM with rotation.

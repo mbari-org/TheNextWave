@@ -70,7 +70,7 @@ def sbg_waves(
     # MATLAB: f = 1/(wsecs) + bandwidth/2 + bandwidth.*(0:(n-1))
     f = (1.0 / wsecs) + (bandwidth / 2.0) + bandwidth * np.arange(n, dtype=float)
 
-    def _invalid_outputs() -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def invalid_outputs() -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         f_out = f[f <= fmax].copy()
         nf = int(f_out.size)
         fill = np.full((nf,), 9999.0, dtype=float)
@@ -89,7 +89,7 @@ def sbg_waves(
 
     # MATLAB: if pts >= w && fs > 1
     if not (pts >= w and fs > 1.0 and nwin >= 1):
-        return _invalid_outputs()
+        return invalid_outputs()
 
     # --- High-pass filter (RC) ---
     alpha = RC / (RC + 1.0 / fs)
@@ -109,7 +109,7 @@ def sbg_waves(
     # --- Break into windows (75% overlap) ---
     step = w // 4  # 25% of window length
     if step <= 0:
-        return _invalid_outputs()
+        return invalid_outputs()
 
     uw = np.zeros((w, nwin), dtype=float)
     vw = np.zeros((w, nwin), dtype=float)
@@ -120,7 +120,7 @@ def sbg_waves(
         end = start + w
         if end > pts:
             # Should not occur given nwin formula, but be safe.
-            return _invalid_outputs()
+            return invalid_outputs()
         uw[:, q] = u[start:end]
         vw[:, q] = v[start:end]
         zw[:, q] = heave[start:end]
@@ -250,7 +250,7 @@ def sbg_waves(
     fwaves = (f > fmin) & (f < fmax)
 
     if not np.any(fwaves) or not np.isfinite(E[fwaves]).any():
-        return _invalid_outputs()
+        return invalid_outputs()
 
     # Significant wave height
     Hs = 4.0 * np.sqrt(np.nansum(E[fwaves]) * bandwidth)

@@ -52,10 +52,10 @@ class TheNextWave:
         self.A0: np.ndarray | None = None
         self.lat_origin: float | None = None
         self.lon_origin: float | None = None
-        self._last_wavespec: WaveSpec | None = None
-        self._last_wavespec_time_s: float | None = None
+        self.last_wavespec: WaveSpec | None = None
+        self.last_wavespec_time_s: float | None = None
 
-    def _wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
+    def wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
         if ws is None:
             return False
         f = np.asarray(getattr(ws, "f", np.array([])), dtype=float)
@@ -96,7 +96,7 @@ class TheNextWave:
             Dp = float(swift_data.peakwavedirT[0])
             results["wave_stats"][swift_name] = {"Hs": Hs, "Tp": Tp, "Dp": Dp}
 
-        zin, uin, vin, tin, xin, yin, fs = self._stack_measurement_data(cleaned_sbg)
+        zin, uin, vin, tin, xin, yin, fs = self.stack_measurement_data(cleaned_sbg)
         fs = float(fs)
         if not np.isfinite(fs) or fs <= 0.0:
             if self.logger is not None:
@@ -107,23 +107,23 @@ class TheNextWave:
         # Use the measurement time base (tin) to determine age.
         current_t_s = float(np.nanmax(tin)) if np.size(tin) else 0.0
         use_cached = False
-        if self.config.wavespec_update_period_sec > 0.0 and self._wavespec_is_usable(self._last_wavespec):
-            if self._last_wavespec_time_s is not None and np.isfinite(current_t_s):
-                age_s = current_t_s - float(self._last_wavespec_time_s)
+        if self.config.wavespec_update_period_sec > 0.0 and self.wavespec_is_usable(self.last_wavespec):
+            if self.last_wavespec_time_s is not None and np.isfinite(current_t_s):
+                age_s = current_t_s - float(self.last_wavespec_time_s)
                 use_cached = age_s >= 0.0 and age_s < float(self.config.wavespec_update_period_sec)
 
         wavespec_new = None
         if not use_cached:
-            wavespec_new = self._build_averaged_wavespec(swift_structs)
+            wavespec_new = self.build_averaged_wavespec(swift_structs)
 
         if use_cached:
-            wavespec = self._last_wavespec
-        elif self._wavespec_is_usable(wavespec_new):
+            wavespec = self.last_wavespec
+        elif self.wavespec_is_usable(wavespec_new):
             wavespec = wavespec_new
-            self._last_wavespec = wavespec_new
-            self._last_wavespec_time_s = current_t_s
-        elif self._wavespec_is_usable(self._last_wavespec):
-            wavespec = self._last_wavespec
+            self.last_wavespec = wavespec_new
+            self.last_wavespec_time_s = current_t_s
+        elif self.wavespec_is_usable(self.last_wavespec):
+            wavespec = self.last_wavespec
             if self.logger is not None:
                 self.logger.warn("No usable wavespec from current window; reusing last valid wavespec")
         else:
@@ -147,7 +147,7 @@ class TheNextWave:
             y_target = 0.0
         else:
             if self.lat_origin is None or self.lon_origin is None:
-                # This should be set by _stack_measurement_data; keep safe fallback.
+                # This should be set by stack_measurement_data; keep safe fallback.
                 self.lat_origin = float(np.asarray(getattr(cleaned_sbg, "sbg22").GpsPos.lat)[0])
                 self.lon_origin = float(np.asarray(getattr(cleaned_sbg, "sbg22").GpsPos.long)[0])
 
@@ -166,7 +166,7 @@ class TheNextWave:
         max_target_distance = float(np.nanmax(dist))
         leadtime = float(max_target_distance / ce) if ce and np.isfinite(ce) else 0.0
 
-        # Match example.py behavior: 1 Hz predictions with horizon determined
+        # Use a fixed 1 Hz prediction cadence; horizon is derived from config.
         # by target distance / phase speed.
         n_lead = int(np.floor(leadtime)) if np.isfinite(leadtime) and leadtime > 0.0 else 1
         if n_lead < 1:
@@ -328,7 +328,7 @@ class TheNextWave:
 
         return results
 
-    def _stack_measurement_data(self, cleaned_sbg: SWIFTArray) -> tuple[np.ndarray, ...]:
+    def stack_measurement_data(self, cleaned_sbg: SWIFTArray) -> tuple[np.ndarray, ...]:
         sbgs: list[SBGData] = []
         for swift_num in range(22, 26):
             sbg = getattr(cleaned_sbg, f"sbg{swift_num}", None)
@@ -344,7 +344,7 @@ class TheNextWave:
 
         return load_raw_arrays_from_sbg(sbgs, self.lat_origin, self.lon_origin, self.config.rotation_deg)
 
-    def _build_averaged_wavespec(self, swift_structs: SWIFTArray) -> WaveSpec:
+    def build_averaged_wavespec(self, swift_structs: SWIFTArray) -> WaveSpec:
         swifts = []
         for swift_name in ("swift22", "swift23", "swift24", "swift25"):
             swift_data = getattr(swift_structs, swift_name, None)

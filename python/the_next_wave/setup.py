@@ -20,10 +20,12 @@ setup(
     tests_require=['pytest'],
     # NOTE: ROS 2 / colcon (ament_python) expects console scripts via setup.py.
     #       Keeping these here avoids relying on older filenames / paths.
-    entry_points={
-        'console_scripts': [
-            'the_next_wave_example = the_next_wave.example:main',
-            'the_next_wave_sim_node = the_next_wave.the_next_wave_node:main',
-        ],
-    },
+    # entry_points={
+    #     'console_scripts': [
+    #         'the_next_wave_example = the_next_wave.example:main',
+    #         'the_next_wave_sim_node = the_next_wave.the_next_wave_node:main',
+    #         'the_next_wave_plotter_node = the_next_wave.the_next_wave_plotter_node:main',
+    #         'the_next_wave_sbg_tcp_replay_node = the_next_wave.sbg_tcp_replay_node:main',
+    #     ],
+    # },
 )

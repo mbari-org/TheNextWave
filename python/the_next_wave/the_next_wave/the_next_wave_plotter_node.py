@@ -23,7 +23,7 @@ from buoy_interfaces.msg import WavePredictionOutput
 from the_next_wave.live_plotter import LivePlotData, LivePlotter
 
 
-def _reshape_f(vec: list[float], n_samples: int, n_buoys: int) -> np.ndarray:
+def reshape_f(vec: list[float], n_samples: int, n_buoys: int) -> np.ndarray:
     a = np.asarray(vec, dtype=float)
     if n_samples <= 0 or n_buoys <= 0:
         return np.zeros((0, 0), dtype=float)
@@ -49,40 +49,40 @@ class TheNextWavePlotterNode(Node):
         if not np.isfinite(history_sec) or history_sec <= 0.0:
             history_sec = 600.0
 
-        self._plotter = LivePlotter(max_points=max_points)
-        self._history_sec = history_sec
+        self.plotter = LivePlotter(max_points=max_points)
+        self.history_sec = history_sec
 
-        self._lock = threading.Lock()
-        self._latest: Optional[WavePredictionOutput] = None
-        self._dirty = False
+        self.lock = threading.Lock()
+        self.latest: Optional[WavePredictionOutput] = None
+        self.dirty = False
 
         # Rolling history for WEC actual samples.
         # If a full WEC time series is carried in the message, we plot that directly.
-        self._wec_hist = deque()  # (t, z, u, v)
+        self.wec_hist = deque()  # (t, z, u, v)
 
-        self._sub = self.create_subscription(
+        self.sub = self.create_subscription(
             WavePredictionOutput,
             prediction_topic,
-            self._cb,
+            self.on_msg,
             10,
         )
 
         self.get_logger().info(f"Plotter subscribing to: {prediction_topic}")
 
-    def _cb(self, msg: WavePredictionOutput) -> None:
-        with self._lock:
-            self._latest = msg
-            self._dirty = True
+    def on_msg(self, msg: WavePredictionOutput) -> None:
+        with self.lock:
+            self.latest = msg
+            self.dirty = True
 
     def is_window_open(self) -> bool:
-        return self._plotter.is_window_open()
+        return self.plotter.is_window_open()
 
     def plot_once(self) -> None:
-        with self._lock:
-            if not self._dirty or self._latest is None:
+        with self.lock:
+            if not self.dirty or self.latest is None:
                 return
-            msg = self._latest
-            self._dirty = False
+            msg = self.latest
+            self.dirty = False
 
         # --- Decode measurements ---
         m = msg.measurements
@@ -90,20 +90,20 @@ class TheNextWavePlotterNode(Node):
         n_buoys = int(m.n_buoys)
 
         t_meas = np.asarray(m.time, dtype=float)
-        x_meas = _reshape_f(m.x_meas, n_samples, n_buoys)
-        y_meas = _reshape_f(m.y_meas, n_samples, n_buoys)
-        z_meas = _reshape_f(m.z_meas, n_samples, n_buoys)
-        u_meas = _reshape_f(m.u_meas, n_samples, n_buoys)
-        v_meas = _reshape_f(m.v_meas, n_samples, n_buoys)
+        x_meas = reshape_f(m.x_meas, n_samples, n_buoys)
+        y_meas = reshape_f(m.y_meas, n_samples, n_buoys)
+        z_meas = reshape_f(m.z_meas, n_samples, n_buoys)
+        u_meas = reshape_f(m.u_meas, n_samples, n_buoys)
+        v_meas = reshape_f(m.v_meas, n_samples, n_buoys)
 
         # Reconstruction
         r = msg.reconstruction
         rn = int(r.n_samples)
         rb = int(r.n_buoys)
         t_rec = np.asarray(r.time, dtype=float)
-        z_recon = _reshape_f(r.z_recon, rn, rb)
-        u_recon = _reshape_f(r.u_recon, rn, rb)
-        v_recon = _reshape_f(r.v_recon, rn, rb)
+        z_recon = reshape_f(r.z_recon, rn, rb)
+        u_recon = reshape_f(r.u_recon, rn, rb)
+        v_recon = reshape_f(r.v_recon, rn, rb)
 
         # Make recon times compatible with LivePlotter (it uses t_meas for both).
         # If recon time differs (it shouldn't), fall back to measurement time.
@@ -147,7 +147,7 @@ class TheNextWavePlotterNode(Node):
         use_msg_series = bool(getattr(msg, "has_wec_actual_series", False)) and len(getattr(msg, "wec_series_time", [])) > 0
         if not use_msg_series and bool(msg.has_wec_actual):
             # Backward-compatible fallback: single sample per message.
-            self._wec_hist.append((float(msg.wec_time), float(msg.wec_z), float(msg.wec_u), float(msg.wec_v)))
+            self.wec_hist.append((float(msg.wec_time), float(msg.wec_z), float(msg.wec_u), float(msg.wec_v)))
 
         # Trim histories
         t_ref = None
@@ -156,9 +156,9 @@ class TheNextWavePlotterNode(Node):
         elif t_pred.size:
             t_ref = float(t_pred[-1])
         if t_ref is not None and np.isfinite(t_ref):
-            t_min = t_ref - float(self._history_sec)
-            while self._wec_hist and self._wec_hist[0][0] < t_min:
-                self._wec_hist.popleft()
+            t_min = t_ref - float(self.history_sec)
+            while self.wec_hist and self.wec_hist[0][0] < t_min:
+                self.wec_hist.popleft()
 
         if use_msg_series:
             t_wec_hist = np.asarray(getattr(msg, "wec_series_time", []), dtype=float)
@@ -166,10 +166,10 @@ class TheNextWavePlotterNode(Node):
             u_wec_hist = np.asarray(getattr(msg, "wec_series_u", []), dtype=float)
             v_wec_hist = np.asarray(getattr(msg, "wec_series_v", []), dtype=float)
         else:
-            t_wec_hist = np.array([p[0] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-            z_wec_hist = np.array([p[1] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-            u_wec_hist = np.array([p[2] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
-            v_wec_hist = np.array([p[3] for p in self._wec_hist], dtype=float) if self._wec_hist else np.array([], dtype=float)
+            t_wec_hist = np.array([p[0] for p in self.wec_hist], dtype=float) if self.wec_hist else np.array([], dtype=float)
+            z_wec_hist = np.array([p[1] for p in self.wec_hist], dtype=float) if self.wec_hist else np.array([], dtype=float)
+            u_wec_hist = np.array([p[2] for p in self.wec_hist], dtype=float) if self.wec_hist else np.array([], dtype=float)
+            v_wec_hist = np.array([p[3] for p in self.wec_hist], dtype=float) if self.wec_hist else np.array([], dtype=float)
 
         t_wec = float(msg.wec_time) if bool(msg.has_wec_actual) else None
         z_wec = float(msg.wec_z) if bool(msg.has_wec_actual) else None
@@ -208,7 +208,7 @@ class TheNextWavePlotterNode(Node):
         )
 
         try:
-            self._plotter.update(d)
+            self.plotter.update(d)
         except Exception as e:
             self.get_logger().warn(f"Plot update failed: {e}")
 
@@ -218,7 +218,7 @@ def main(args=None) -> None:
     node = TheNextWavePlotterNode()
 
     # Create the GUI in the main thread.
-    node._plotter.ensure_initialized()
+    node.plotter.ensure_initialized()
 
     try:
         import matplotlib.pyplot as plt

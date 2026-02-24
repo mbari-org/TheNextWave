@@ -9,7 +9,7 @@ import scipy.linalg as splin
 from .swift import LSQWavePropParams
 
 
-def _solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
+def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
     '''
     Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub
 
@@ -378,7 +378,7 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     lb = -amps / np.sqrt(2.0)
     ub =  amps / np.sqrt(2.0)
 
-    A, info = _solve_box_ridge_lbfgsb(
+    A, info = solve_box_ridge_lbfgsb(
         P1,
         b,
         lb,

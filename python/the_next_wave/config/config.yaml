@@ -7,6 +7,15 @@
     dense_prediction_window: 50.0
     # How much high-rate WEC actual history to package in each prediction message.
     wec_actual_history_sec: 50.0
+
+    # When ingesting raw SBG via the TCP bridge (e.g., local TCP replay without Gazebo/WEC topics),
+    # optionally force the same coordinate frame used by example.py.
+    sbg_bridge_use_example_frame: true
+    example_latorigin: 41.6878
+    example_lonorigin: -9.0545
+    example_rotation_deg: 180.0
+    example_xtarget: 200.0
+    example_ytarget: 200.0
     swifts:
       swift22: 1
       swift23: 2

@@ -18,7 +18,7 @@ from .utilities import (
 from .download_example_data import get_example_data_dir
 
 
-def _parse_args():
+def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
         '--movie',
@@ -41,7 +41,7 @@ all_preds = Prediction()
 def main():
     global A0
     global all_preds
-    args = _parse_args()
+    args = parse_args()
 
     # match MATLAB example
     latorigin = 41.6878

@@ -9,7 +9,7 @@ import scipy.io as spio
 import xarray as xr
 
 
-def _loadmat_struct(path: str):
+def loadmat_struct(path: str):
     # scipy.io.loadmat gives MATLAB structs as objects when struct_as_record=False
     return spio.loadmat(str(path), struct_as_record=False, squeeze_me=True)
 
@@ -30,7 +30,7 @@ class WaveSpec:
     spread2: npt.NDArray[np.float64] = field(default_factory=empty_float64)
 
 
-def _get_field_meta(dc_type) -> Dict[str, Dict[str, Any]]:
+def get_field_meta(dc_type) -> Dict[str, Dict[str, Any]]:
     """Return mapping field_name -> metadata dict for a dataclass type."""
     out: Dict[str, Dict[str, Any]] = {}
     for f in fields(dc_type):
@@ -46,7 +46,7 @@ def recursive_metadata(dc_instance_or_type) -> Dict[str, Any]:
     """
     if hasattr(dc_instance_or_type, "__dataclass_fields__"):
         # dataclass type or instance
-        meta = _get_field_meta(dc_instance_or_type if isinstance(dc_instance_or_type, type) else type(dc_instance_or_type))
+        meta = get_field_meta(dc_instance_or_type if isinstance(dc_instance_or_type, type) else type(dc_instance_or_type))
         if not isinstance(dc_instance_or_type, type):
             # instance: recurse into nested dataclass values
             out = {}
@@ -448,7 +448,7 @@ class SWIFTArray:
     ):
         swifts = [None, None, None, None]
         for swift_idx, swiftd in enumerate(swiftdat):
-            swift = _loadmat_struct(swiftd)['SWIFT']
+            swift = loadmat_struct(swiftd)['SWIFT']
             if select_idx is not None:
                 try:
                     if swift.size > 1:
@@ -460,7 +460,7 @@ class SWIFTArray:
 
         sbgs = [None, None, None, None]
         for sbg_idx, sbgd in enumerate(sbgdat):
-            sbg = _loadmat_struct(sbgd)['sbgData']
+            sbg = loadmat_struct(sbgd)['sbgData']
             if select_idx is not None:
                 try:
                     if sbg.size > 1:
@@ -653,26 +653,26 @@ class Prediction:
     )
 
     # staging (not exported)
-    _starts: List[float] = field(default_factory=list, init=False, repr=False)
-    _tm: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _zm: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _um: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _vm: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _xm: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _ym: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    starts_buf: List[float] = field(default_factory=list, init=False, repr=False)
+    tm_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    zm_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    um_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    vm_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    xm_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    ym_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
 
-    _zc: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _uc: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _vc: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    zc_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    uc_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    vc_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
 
-    _tp: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _zp: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _up: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _vp: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
-    _nlead: List[int] = field(default_factory=list, init=False, repr=False)
+    tp_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    zp_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    up_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    vp_buf: List[np.ndarray] = field(default_factory=list, init=False, repr=False)
+    nlead_buf: List[int] = field(default_factory=list, init=False, repr=False)
 
-    _ct: List[float] = field(default_factory=list, init=False, repr=False)
-    _params: List['LSQWavePropParams'] = field(default_factory=list, init=False, repr=False)
+    ct_buf: List[float] = field(default_factory=list, init=False, repr=False)
+    params_buf: List['LSQWavePropParams'] = field(default_factory=list, init=False, repr=False)
 
     def append_window(
         self,
@@ -693,79 +693,79 @@ class Prediction:
         params: 'LSQWavePropParams',
         comp_time: float,
     ) -> None:
-        self._starts.append(float(window_start_time))
+        self.starts_buf.append(float(window_start_time))
 
-        self._tm.append(tm)
-        self._zm.append(zm)
-        self._um.append(um)
-        self._vm.append(vm)
-        self._xm.append(xm)
-        self._ym.append(ym)
+        self.tm_buf.append(tm)
+        self.zm_buf.append(zm)
+        self.um_buf.append(um)
+        self.vm_buf.append(vm)
+        self.xm_buf.append(xm)
+        self.ym_buf.append(ym)
 
-        self._zc.append(zc)
-        self._uc.append(uc)
-        self._vc.append(vc)
+        self.zc_buf.append(zc)
+        self.uc_buf.append(uc)
+        self.vc_buf.append(vc)
 
         tp = np.ravel(tp)
         zp = np.ravel(zp)
 
-        self._tp.append(tp)
-        self._zp.append(zp)
+        self.tp_buf.append(tp)
+        self.zp_buf.append(zp)
 
-        self._up.append(np.ravel(up) if up is not None else np.full(tp.shape, np.nan, dtype=float))
-        self._vp.append(np.ravel(vp) if vp is not None else np.full(tp.shape, np.nan, dtype=float))
+        self.up_buf.append(np.ravel(up) if up is not None else np.full(tp.shape, np.nan, dtype=float))
+        self.vp_buf.append(np.ravel(vp) if vp is not None else np.full(tp.shape, np.nan, dtype=float))
 
-        self._nlead.append(int(tp.size))
+        self.nlead_buf.append(int(tp.size))
 
-        self._params.append(params)
-        self._ct.append(float(comp_time))
+        self.params_buf.append(params)
+        self.ct_buf.append(float(comp_time))
 
     def finalize(self) -> None:
-        if not self._starts:
+        if not self.starts_buf:
             return
 
-        starts = np.array(self._starts, dtype=float)
+        starts = np.array(self.starts_buf, dtype=float)
         order = np.argsort(starts)
 
         self.window_start_time = starts[order]
 
-        def _stack_3d(lst: List[np.ndarray]) -> np.ndarray:
+        def stack_3d(lst: List[np.ndarray]) -> np.ndarray:
             return np.stack([lst[i] for i in order], axis=0)
 
-        self.tm = _stack_3d(self._tm)
-        self.zm = _stack_3d(self._zm)
-        self.um = _stack_3d(self._um)
-        self.vm = _stack_3d(self._vm)
-        self.xm = _stack_3d(self._xm)
-        self.ym = _stack_3d(self._ym)
+        self.tm = stack_3d(self.tm_buf)
+        self.zm = stack_3d(self.zm_buf)
+        self.um = stack_3d(self.um_buf)
+        self.vm = stack_3d(self.vm_buf)
+        self.xm = stack_3d(self.xm_buf)
+        self.ym = stack_3d(self.ym_buf)
 
-        self.zc = _stack_3d(self._zc)
-        self.uc = _stack_3d(self._uc)
-        self.vc = _stack_3d(self._vc)
+        self.zc = stack_3d(self.zc_buf)
+        self.uc = stack_3d(self.uc_buf)
+        self.vc = stack_3d(self.vc_buf)
 
-        nlead = np.array([self._nlead[i] for i in order], dtype=np.int32)
+        nlead = np.array([self.nlead_buf[i] for i in order], dtype=np.int32)
         self.n_lead = nlead
 
         max_lead = int(np.max(nlead))
         W = self.window_start_time.size
 
-        def _pad_2d(lst_1d: List[np.ndarray]) -> np.ndarray:
+        def pad_2d(lst_1d: List[np.ndarray]) -> np.ndarray:
             out = np.full((W, max_lead), np.nan, dtype=float)
             for wi, idx in enumerate(order):
                 v = np.ravel(lst_1d[idx])
                 out[wi, :v.size] = v
             return out
 
-        self.tp = _pad_2d(self._tp)
-        self.zp = _pad_2d(self._zp)
-        self.up = _pad_2d(self._up)
-        self.vp = _pad_2d(self._vp)
+        self.tp = pad_2d(self.tp_buf)
+        self.zp = pad_2d(self.zp_buf)
+        self.up = pad_2d(self.up_buf)
+        self.vp = pad_2d(self.vp_buf)
 
-        self.comp_time = np.array([self._ct[i] for i in order], dtype=float)
-        self.params = [self._params[i] for i in order]
+        self.comp_time = np.array([self.ct_buf[i] for i in order], dtype=float)
+        self.params = [self.params_buf[i] for i in order]
 
     @staticmethod
-    def _apply_dataclass_metadata(ds: xr.Dataset) -> xr.Dataset:
+    def apply_dataclass_metadata(ds: xr.Dataset) -> xr.Dataset:
         meta = {f.name: dict(f.metadata) for f in fields(Prediction) if f.metadata}
 
         for name in list(ds.data_vars):
@@ -861,7 +861,7 @@ class Prediction:
             ds['param_omega'] = (('window_start_time', 'frequency_direction'), omega)
             ds['param_omega'].attrs.update({'units': 'rad/s', 'description': 'omega for each (f,theta) pair used in the solve'})
 
-        ds = self._apply_dataclass_metadata(ds)
+        ds = self.apply_dataclass_metadata(ds)
         ds.to_netcdf(path) #, engine='h5netcdf', invalid_netcdf=False)
         print(f'Saved windows to {path}')
 

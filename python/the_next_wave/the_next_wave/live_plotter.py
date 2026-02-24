@@ -57,24 +57,24 @@ class LivePlotter:
         # Import matplotlib lazily so the node can run headless without failing.
         import matplotlib.pyplot as plt
 
-        self._plt = plt
-        self._fig = None
+        self.plt = plt
+        self.fig = None
 
-        self._ax_map = None
-        self._ax_z_in = None
-        self._ax_u_in = None
-        self._ax_v_in = None
-        self._ax_z_rec = None
-        self._ax_u_rec = None
-        self._ax_v_rec = None
-        self._ax_z_pred = None
-        self._ax_u_pred = None
-        self._ax_v_pred = None
+        self.ax_map = None
+        self.ax_z_in = None
+        self.ax_u_in = None
+        self.ax_v_in = None
+        self.ax_z_rec = None
+        self.ax_u_rec = None
+        self.ax_v_rec = None
+        self.ax_z_pred = None
+        self.ax_u_pred = None
+        self.ax_v_pred = None
 
-        self._initialized = False
+        self.initialized = False
         self.max_points = int(max_points) if max_points and max_points > 0 else 0
 
-    def _decimate_1d(self, x: np.ndarray) -> np.ndarray:
+    def decimate_1d(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x)
         if self.max_points <= 0:
             return x
@@ -85,7 +85,7 @@ class LivePlotter:
             return x
         return x[::step]
 
-    def _decimate_2d_rows(self, a: np.ndarray) -> np.ndarray:
+    def decimate_2d_rows(self, a: np.ndarray) -> np.ndarray:
         a = np.asarray(a)
         if self.max_points <= 0:
             return a
@@ -103,62 +103,62 @@ class LivePlotter:
 
         Must be called from the main thread when using GUI backends.
         """
-        if not self._initialized:
-            self._init_figure()
+        if not self.initialized:
+            self.init_figure()
 
     def is_window_open(self) -> bool:
         """Return True if the plot window still exists."""
-        if not self._initialized:
+        if not self.initialized:
             return True
-        return bool(self._plt.fignum_exists(1))
+        return bool(self.plt.fignum_exists(1))
 
-    def _init_figure(self):
-        plt = self._plt
+    def init_figure(self):
+        plt = self.plt
         plt.ion()
-        self._fig = plt.figure(1)
-        self._fig.clf()
+        self.fig = plt.figure(1)
+        self.fig.clf()
 
         # Match the example.py layout as closely as practical.
-        self._ax_map = self._fig.add_subplot(2, 2, 2)
+        self.ax_map = self.fig.add_subplot(2, 2, 2)
 
-        self._ax_z_in = self._fig.add_subplot(6, 2, 1)
-        self._ax_u_in = self._fig.add_subplot(6, 2, 3)
-        self._ax_v_in = self._fig.add_subplot(6, 2, 5)
+        self.ax_z_in = self.fig.add_subplot(6, 2, 1)
+        self.ax_u_in = self.fig.add_subplot(6, 2, 3)
+        self.ax_v_in = self.fig.add_subplot(6, 2, 5)
 
-        self._ax_z_rec = self._fig.add_subplot(6, 2, 7)
-        self._ax_u_rec = self._fig.add_subplot(6, 2, 9)
-        self._ax_v_rec = self._fig.add_subplot(6, 2, 11)
+        self.ax_z_rec = self.fig.add_subplot(6, 2, 7)
+        self.ax_u_rec = self.fig.add_subplot(6, 2, 9)
+        self.ax_v_rec = self.fig.add_subplot(6, 2, 11)
 
-        self._ax_z_pred = self._fig.add_subplot(6, 2, 8)
-        self._ax_u_pred = self._fig.add_subplot(6, 2, 10)
-        self._ax_v_pred = self._fig.add_subplot(6, 2, 12)
+        self.ax_z_pred = self.fig.add_subplot(6, 2, 8)
+        self.ax_u_pred = self.fig.add_subplot(6, 2, 10)
+        self.ax_v_pred = self.fig.add_subplot(6, 2, 12)
 
-        self._initialized = True
+        self.initialized = True
 
     def update(self, d: LivePlotData) -> None:
-        if not self._initialized:
-            self._init_figure()
+        if not self.initialized:
+            self.init_figure()
 
         # Clear axes each update (simple + robust).
         axes = (
-            self._ax_map,
-            self._ax_z_in,
-            self._ax_u_in,
-            self._ax_v_in,
-            self._ax_z_rec,
-            self._ax_u_rec,
-            self._ax_v_rec,
-            self._ax_z_pred,
-            self._ax_u_pred,
-            self._ax_v_pred,
+            self.ax_map,
+            self.ax_z_in,
+            self.ax_u_in,
+            self.ax_v_in,
+            self.ax_z_rec,
+            self.ax_u_rec,
+            self.ax_v_rec,
+            self.ax_z_pred,
+            self.ax_u_pred,
+            self.ax_v_pred,
         )
         for ax in axes:
             ax.cla()
 
         # --- Map ---
-        ax = self._ax_map
-        x_meas = self._decimate_2d_rows(np.asarray(d.x_meas, dtype=float))
-        y_meas = self._decimate_2d_rows(np.asarray(d.y_meas, dtype=float))
+        ax = self.ax_map
+        x_meas = self.decimate_2d_rows(np.asarray(d.x_meas, dtype=float))
+        y_meas = self.decimate_2d_rows(np.asarray(d.y_meas, dtype=float))
         if x_meas.ndim == 2 and y_meas.ndim == 2 and x_meas.size and y_meas.size:
             ax.plot(x_meas, y_meas, "x", linewidth=2)
         ax.plot([d.x_target], [d.y_target], "ko", linewidth=2, markersize=6)
@@ -170,47 +170,47 @@ class LivePlotter:
         # --- Measurements + recon ---
         t_meas = np.asarray(d.t_meas, dtype=float)
         if t_meas.ndim == 2 and t_meas.shape[1] > 0:
-            t_plot = self._decimate_2d_rows(t_meas)
+            t_plot = self.decimate_2d_rows(t_meas)
         else:
-            t_plot = self._decimate_1d(t_meas)
+            t_plot = self.decimate_1d(t_meas)
 
-        z_meas = self._decimate_2d_rows(np.asarray(d.z_meas, dtype=float))
-        u_meas = self._decimate_2d_rows(np.asarray(d.u_meas, dtype=float))
-        v_meas = self._decimate_2d_rows(np.asarray(d.v_meas, dtype=float))
+        z_meas = self.decimate_2d_rows(np.asarray(d.z_meas, dtype=float))
+        u_meas = self.decimate_2d_rows(np.asarray(d.u_meas, dtype=float))
+        v_meas = self.decimate_2d_rows(np.asarray(d.v_meas, dtype=float))
 
-        z_recon = self._decimate_2d_rows(np.asarray(d.z_recon, dtype=float))
-        u_recon = self._decimate_2d_rows(np.asarray(d.u_recon, dtype=float))
-        v_recon = self._decimate_2d_rows(np.asarray(d.v_recon, dtype=float))
+        z_recon = self.decimate_2d_rows(np.asarray(d.z_recon, dtype=float))
+        u_recon = self.decimate_2d_rows(np.asarray(d.u_recon, dtype=float))
+        v_recon = self.decimate_2d_rows(np.asarray(d.v_recon, dtype=float))
 
         if z_meas.size:
-            self._ax_z_in.plot(t_plot, z_meas)
-        self._ax_z_in.set_ylabel("z in [m]")
+            self.ax_z_in.plot(t_plot, z_meas)
+        self.ax_z_in.set_ylabel("z in [m]")
 
         if u_meas.size:
-            self._ax_u_in.plot(t_plot, u_meas)
-        self._ax_u_in.set_ylabel("u in [m/s]")
+            self.ax_u_in.plot(t_plot, u_meas)
+        self.ax_u_in.set_ylabel("u in [m/s]")
 
         if v_meas.size:
-            self._ax_v_in.plot(t_plot, v_meas)
-        self._ax_v_in.set_ylabel("v in [m/s]")
+            self.ax_v_in.plot(t_plot, v_meas)
+        self.ax_v_in.set_ylabel("v in [m/s]")
 
         if z_recon.size:
-            self._ax_z_rec.plot(t_plot, z_recon)
-        self._ax_z_rec.set_ylabel("z recon [m]")
+            self.ax_z_rec.plot(t_plot, z_recon)
+        self.ax_z_rec.set_ylabel("z recon [m]")
 
         if u_recon.size:
-            self._ax_u_rec.plot(t_plot, u_recon)
-        self._ax_u_rec.set_ylabel("u recon [m/s]")
+            self.ax_u_rec.plot(t_plot, u_recon)
+        self.ax_u_rec.set_ylabel("u recon [m/s]")
 
         if v_recon.size:
-            self._ax_v_rec.plot(t_plot, v_recon)
-        self._ax_v_rec.set_ylabel("v recon [m/s]")
-        self._ax_v_rec.set_xlabel("t [s]")
+            self.ax_v_rec.plot(t_plot, v_recon)
+        self.ax_v_rec.set_ylabel("v recon [m/s]")
+        self.ax_v_rec.set_xlabel("t [s]")
 
         # --- Predictions (target) ---
-        t_pred = self._decimate_1d(np.asarray(d.t_pred, dtype=float).ravel())
+        t_pred = self.decimate_1d(np.asarray(d.t_pred, dtype=float).ravel())
 
-        t_wec_hist = self._decimate_1d(np.asarray(d.t_wec_hist, dtype=float).ravel())
+        t_wec_hist = self.decimate_1d(np.asarray(d.t_wec_hist, dtype=float).ravel())
 
         # Dense target predictions series (optional)
         t_nc = np.asarray(getattr(d, "dense_predictions_time", np.array([])), dtype=float).ravel()
@@ -220,25 +220,25 @@ class LivePlotter:
         has_nc = bool(getattr(d, "has_dense_predictions", False)) and t_nc.size and z_nc.size
         if has_nc:
             n_nc = int(min(t_nc.size, z_nc.size, u_nc.size, v_nc.size))
-            t_nc = self._decimate_1d(t_nc[:n_nc])
-            z_nc = self._decimate_1d(z_nc[:n_nc])
-            u_nc = self._decimate_1d(u_nc[:n_nc])
-            v_nc = self._decimate_1d(v_nc[:n_nc])
+            t_nc = self.decimate_1d(t_nc[:n_nc])
+            z_nc = self.decimate_1d(z_nc[:n_nc])
+            u_nc = self.decimate_1d(u_nc[:n_nc])
+            v_nc = self.decimate_1d(v_nc[:n_nc])
 
-        def _plot_pred(axp, y_pred, t_wec, y_wec, y_wec_hist, ylabel: str, y_nc: np.ndarray | None):
-            y_pred = self._decimate_1d(np.asarray(y_pred, dtype=float).ravel())
+        def plot_pred(axp, y_pred, t_wec, y_wec, y_wec_hist, ylabel: str, y_nc: np.ndarray | None):
+            y_pred = self.decimate_1d(np.asarray(y_pred, dtype=float).ravel())
             if t_pred.size and y_pred.size:
                 axp.plot(t_pred, y_pred, "k")
 
             # Dense model-at-target predictions (measurement-rate).
             if has_nc and y_nc is not None:
-                y_nc = self._decimate_1d(np.asarray(y_nc, dtype=float).ravel())
+                y_nc = self.decimate_1d(np.asarray(y_nc, dtype=float).ravel())
                 n = min(t_nc.size, y_nc.size)
                 if n:
                     axp.plot(t_nc[:n], y_nc[:n], color="C2", linewidth=1.2, alpha=0.9)
 
             # History of WEC actual samples.
-            y_wh = self._decimate_1d(np.asarray(y_wec_hist, dtype=float).ravel())
+            y_wh = self.decimate_1d(np.asarray(y_wec_hist, dtype=float).ravel())
             if t_wec_hist.size and y_wh.size:
                 n = min(t_wec_hist.size, y_wh.size)
                 axp.plot(t_wec_hist[:n], y_wh[:n], ".", color="C3", markersize=4, alpha=0.6)
@@ -252,11 +252,11 @@ class LivePlotter:
 
             axp.set_ylabel(ylabel)
 
-        _plot_pred(self._ax_z_pred, d.z_pred, d.t_wec, d.z_wec, d.z_wec_hist, "z pred [m]", z_nc if has_nc else None)
-        _plot_pred(self._ax_u_pred, d.u_pred, d.t_wec, d.u_wec, d.u_wec_hist, "u pred [m/s]", u_nc if has_nc else None)
-        _plot_pred(self._ax_v_pred, d.v_pred, d.t_wec, d.v_wec, d.v_wec_hist, "v pred [m/s]", v_nc if has_nc else None)
-        self._ax_v_pred.set_xlabel("t [s]")
+        plot_pred(self.ax_z_pred, d.z_pred, d.t_wec, d.z_wec, d.z_wec_hist, "z pred [m]", z_nc if has_nc else None)
+        plot_pred(self.ax_u_pred, d.u_pred, d.t_wec, d.u_wec, d.u_wec_hist, "u pred [m/s]", u_nc if has_nc else None)
+        plot_pred(self.ax_v_pred, d.v_pred, d.t_wec, d.v_wec, d.v_wec_hist, "v pred [m/s]", v_nc if has_nc else None)
+        self.ax_v_pred.set_xlabel("t [s]")
 
         # Keep GUI responsive.
-        self._fig.canvas.draw_idle()
+        self.fig.canvas.draw_idle()
         # GUI event pumping is handled by the node's main-thread loop.
