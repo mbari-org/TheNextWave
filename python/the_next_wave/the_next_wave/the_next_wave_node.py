@@ -835,9 +835,23 @@ def main(args=None):
     node = TheNextWaveNode()
     try:
         node.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        # SIGINT may already have shut down the context; try_shutdown is idempotent.
+        try:
+            rclpy.try_shutdown()
+        except AttributeError:
+            # Fallback for older rclpy
+            try:
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
