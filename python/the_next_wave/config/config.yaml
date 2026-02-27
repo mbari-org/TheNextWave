@@ -1,21 +1,45 @@
+# Config for simulation with mbari_wec (gz sim)
 /the_next_wave_node:
   ros__parameters:
+    # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
+    flip_z_sign: false
+    # Use ENU-style local frame: x=east, y=north.
+    rotation_deg: 0.0
     downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     # Only compute/publish dense_predictions_* for the last N seconds of the
     # measurement window. Set to 0 to use the full window.
     dense_prediction_window: 50.0
+    # If true, evaluate dense model output on WEC actual-history timestamps (sim only).
+    enable_dense_history_projection: false
     # How much high-rate WEC actual history to package in each prediction message.
     wec_actual_history_sec: 50.0
 
-    # When ingesting raw SBG via the TCP bridge (e.g., local TCP replay without Gazebo/WEC topics),
-    # optionally force the same coordinate frame used by example.py.
-    sbg_bridge_use_example_frame: true
-    example_latorigin: 41.6878
-    example_lonorigin: -9.0545
-    example_rotation_deg: 180.0
-    example_xtarget: 200.0
-    example_ytarget: 200.0
+    # Least-squares solver tuning
+    lsq_ridge: 1.0e-6
+    lsq_max_iter: 60
+    lsq_use_spectrum_weighted_ridge: true
+    lsq_spectrum_ridge_floor: 1.0e-6
+    lsq_diagnostics_enable: true
+    lsq_near_bound_ratio: 0.95
+
+    # Optional MEM stabilization (disabled by default; diverges from MATLAB).
+    mem_moment_cap_enable: true
+    mem_moment_cap: 0.999
+
+    # Sim latent ingest noise floor (helps avoid MEM singularities on perfect waves).
+    latent_noise_std_z_m: 0.0  # 1.0e-6
+    latent_noise_std_uv_mps: 0.0  # 1.0e-6
+    latent_noise_seed: 0
+
+    # For SWIFT bridge + replay only
+    sbg_bridge_use_example_frame: false
+
+    # SWIFT buoy index mapping for latent_data incident wave height providing (u,v,eta). Matches the
+    # order of points added to buoy_gazebo::IncWaveHeight plugin in:
+    #     `mbari_wec_gz/buoy_description/models/mbari_wec_ros/model.sdf`.
+    # NOTE: index 0 is reserved for the incident wave height at the `target` mbari wec buoy (used
+    #       only for comparison with prediction -- not for computing prediction)
     swifts:
       swift22: 1
       swift23: 2

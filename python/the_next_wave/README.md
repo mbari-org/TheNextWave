@@ -3,6 +3,20 @@ Deterministic ocean wave prediction from sparse buoy data. This methodology and 
 phase-resolved reconstructions of ocean waves over short time-space scales using measurements of
 wave motion collected by sparse arrays of Surface Wave Instrument Floats w/ Tracking (SWIFTs). 
 
+## Frames and conventions
+
+This package uses a local Cartesian frame for both buoy positions and horizontal velocity components.
+
+- **Local horizontal frame**: $x$ is East (meters), $y$ is North (meters). $z$ is up-positive (meters).
+- **Horizontal velocities**: $u$ is East (m/s), $v$ is North (m/s).
+- **Simulation (`mbari_wec_gz`)**: the incident-wave latent data is published in world coordinates and already uses $u/v$ = East/North. Do not apply SWIFT SBG mounting corrections to sim.
+- **Heave sign (`flip_z_sign`)**: set `true` for real SWIFT SBG streams (upside-down mount correction), and `false` for sim sources that already publish up-positive $z$.
+- **Rotation (`rotation_deg`)**:
+   - In the Python port, `rotation_deg` is applied in the lat/lon → x/y projection (clockwise-positive).
+   - If `rotation_deg != 0`, the resulting x/y axes are *not* East/North anymore.
+   - The current pipeline does **not** rotate $u/v$ when `rotation_deg` is nonzero, so the safest default is `rotation_deg: 0.0` unless you rotate $u/v$ consistently upstream.
+   - The MATLAB SWIFTcodes `GenericCoordinateTransform` uses a different convention, so you may see the offline MATLAB example use `rotation=180` while the Python example uses `rotation=0` for the same physical layout.
+
 ## ROS 2
 Prerequisite: Follow installation steps to install ROS 2 on your machine.  
 (If you would like to skip installing ROS 2 for now, and just run an example, you may skip to
@@ -37,6 +51,12 @@ ros2 run the_next_wave the_next_wave_example
 
 If you would like to generate a video instead of plotting, you can add the `--movie out.mp4`
 argument.
+
+## Production (SBG Ethernet Bridge)
+
+For field/production notes on wiring SWIFT SBG streams over a Digi Ethernet bridge into the ROS 2 SBG TCP bridge server, see:
+
+- [docs/ethernet_bridge_production_setup.md](docs/ethernet_bridge_production_setup.md)
 
 #### Quick Start (Skip ROS 2 Install)
 Prerequisite: [Install](https://docs.astral.sh/uv/getting-started/installation/) `uv` Python3 package  

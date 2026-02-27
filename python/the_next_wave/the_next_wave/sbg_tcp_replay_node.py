@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-"""SBG TCP replay node.
+"""
+SBG TCP replay node.
 
 Reads a raw SBG MATLAB file (same format used by `example.py`) and replays a
 minimal subset of SBG ECom binary frames to a TCP server (Ethernet bridge).
@@ -14,7 +15,6 @@ import socket
 import struct
 import threading
 import time
-from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -31,66 +31,95 @@ except ImportError as e:  # pragma: no cover
     SCIPY_IMPORT_ERROR = e
 
 
-SYNC = b"\xff\x5a"
-MSG_CLASS_ECOM_LOG = b"\x00"
-ETX = b"\x33"
-DUMMY_CRC = b"\x00\x00"
+SYNC = b'\xff\x5a'
+MSG_CLASS_ECOM_LOG = b'\x00'
+ETX = b'\x33'
+DUMMY_CRC = b'\x00\x00'
 
 
-def loadmat_struct(path: str | Path):
+def loadmat_struct(path: str):
     if spio is None:  # pragma: no cover
-        raise ImportError("scipy is required to load MATLAB .mat files") from SCIPY_IMPORT_ERROR
+        raise ImportError('scipy is required to load MATLAB .mat files') from SCIPY_IMPORT_ERROR
     return spio.loadmat(str(path), struct_as_record=False, squeeze_me=True)
 
 
 class SbgTcpReplayNode(Node):
+    """Replay SBG frames from a MATLAB file to a TCP bridge endpoint."""
+
     def __init__(self):
-        super().__init__("the_next_wave_sbg_tcp_replay")
+        super().__init__('the_next_wave_sbg_tcp_replay')
 
-        self.declare_parameter("host", "127.0.0.1")
-        self.declare_parameter("port", 3001)
-        self.declare_parameter("sbg_mat_path", "")
-        self.declare_parameter("swift_num", 22)
-        self.declare_parameter("start_index", 0)
-        self.declare_parameter("end_index", -1)
-        self.declare_parameter("speed", 1.0)
-        self.declare_parameter("loop", True)
-        self.declare_parameter("connect_retry_sec", 1.0)
+        self.declare_parameter('host', '127.0.0.1')
+        # If <= 0, port is resolved from swifts.swiftNN (deployment-style mapping).
+        self.declare_parameter('port', -1)
+        self.declare_parameter('sbg_mat_path', '')
+        self.declare_parameter('swift_num', 22)
+        self.declare_parameter('start_index', 0)
+        self.declare_parameter('end_index', -1)
+        self.declare_parameter('speed', 1.0)
+        self.declare_parameter('loop', True)
+        self.declare_parameter('connect_retry_sec', 1.0)
 
-        self.host = str(self.get_parameter("host").value)
-        self.port = int(self.get_parameter("port").value)
-        self.sbg_mat_path = str(self.get_parameter("sbg_mat_path").value)
-        self.swift_num = int(self.get_parameter("swift_num").value)
-        self.start_index = int(self.get_parameter("start_index").value)
-        self.end_index = int(self.get_parameter("end_index").value)
-        self.speed = float(self.get_parameter("speed").value)
-        self.loop = bool(self.get_parameter("loop").value)
-        self.connect_retry_sec = float(self.get_parameter("connect_retry_sec").value)
+        self.host = str(self.get_parameter('host').value)
+        self.port = int(self.get_parameter('port').value)
+        self.sbg_mat_path = str(self.get_parameter('sbg_mat_path').value)
+        self.swift_num = int(self.get_parameter('swift_num').value)
+        self.start_index = int(self.get_parameter('start_index').value)
+        self.end_index = int(self.get_parameter('end_index').value)
+        self.speed = float(self.get_parameter('speed').value)
+        self.loop = bool(self.get_parameter('loop').value)
+        self.connect_retry_sec = float(self.get_parameter('connect_retry_sec').value)
         if not np.isfinite(self.connect_retry_sec) or self.connect_retry_sec <= 0.0:
             self.connect_retry_sec = 1.0
+
+        self.port = self.resolve_port()
 
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
+    def resolve_port(self) -> int:
+        p = int(self.get_parameter('port').value)
+        if p > 0:
+            return p
+
+        UNSET = -1
+        for sid in range(22, 26):
+            self.declare_parameter(f'swifts.swift{sid}', UNSET)
+
+        swift_params = self.get_parameters_by_prefix('swifts')  # keys: 'swift22', 'swift23', ...
+        p2 = swift_params.get(f'swift{int(self.swift_num)}')
+        if p2 is not None:
+            try:
+                val = int(p2.value)
+            except Exception:
+                val = UNSET
+            if val >= 1024 and val <= 65535:
+                return int(val)
+
+        raise RuntimeError(
+            f'No TCP port configured for swift{int(self.swift_num)}. '
+            "Set 'port' explicitly or provide swifts.swiftNN as a TCP port in the params YAML."
+        )
+
     def resolve_default_mat_path(self) -> str:
         # Use/download the pinned example dataset.
         example_dir = get_example_data_dir()
         if not example_dir.is_dir():
-            raise FileNotFoundError(f"Example data dir does not exist: {example_dir}")
+            raise FileNotFoundError(f'Example data dir does not exist: {example_dir}')
 
         # Prefer the known SWIFT file names used in our launch defaults.
-        preferred = example_dir / f"SWIFT{self.swift_num}_SBG_12Sep2022_07_01.mat"
+        preferred = example_dir / f'SWIFT{self.swift_num}_SBG_12Sep2022_07_01.mat'
         if preferred.is_file():
             return str(preferred)
 
         # Otherwise fall back to the first matching file.
-        matches = sorted(example_dir.glob(f"SWIFT{self.swift_num}_SBG_*.mat"))
+        matches = sorted(example_dir.glob(f'SWIFT{self.swift_num}_SBG_*.mat'))
         if matches:
             return str(matches[0])
 
         raise FileNotFoundError(
-            f"No SWIFT{self.swift_num} SBG .mat files found in example data dir: {example_dir}"
+            f'No SWIFT{self.swift_num} SBG .mat files found in example data dir: {example_dir}'
         )
 
     def destroy_node(self):
@@ -103,25 +132,25 @@ class SbgTcpReplayNode(Node):
     def send_msg(self, sock: socket.socket, msg_id: bytes, values: tuple) -> None:
         info = sbgMessageParse.sbgMessages.get(msg_id)
         if info is None:
-            raise ValueError(f"Unknown msg_id {msg_id!r}")
+            raise ValueError(f'Unknown msg_id {msg_id!r}')
 
-        payload = struct.pack(info["unpackString"], *values)
-        if len(payload) != int(info["intLength"]):
-            raise ValueError("Packed payload length mismatch")
+        payload = struct.pack(info['unpackString'], *values)
+        if len(payload) != int(info['intLength']):
+            raise ValueError('Packed payload length mismatch')
 
-        frame = SYNC + msg_id + MSG_CLASS_ECOM_LOG + info["binLength"] + payload + DUMMY_CRC + ETX
+        frame = SYNC + msg_id + MSG_CLASS_ECOM_LOG + info['binLength'] + payload + DUMMY_CRC + ETX
         sock.sendall(frame)
 
     def run_once(self) -> None:
         if not self.sbg_mat_path:
             self.sbg_mat_path = self.resolve_default_mat_path()
-            self.get_logger().info(f"Using SBG .mat: {self.sbg_mat_path}")
+            self.get_logger().info(f'Using SBG .mat: {self.sbg_mat_path}')
 
         mat = loadmat_struct(self.sbg_mat_path)
-        sbg_data = mat["sbgData"]
+        sbg_data = mat['sbgData']
         sbg = select_sbg_burst_struct(sbg_data, prefer_longest=True)
-        if getattr(sbg_data, "size", 1) > 1:
-            self.get_logger().info("sbgData contains multiple bursts; selected the longest")
+        if getattr(sbg_data, 'size', 1) > 1:
+            self.get_logger().info('sbgData contains multiple bursts; selected the longest')
 
         t_us, heave, vel_e, vel_n, lat, lon = load_raw_sbg_arrays(
             sbg,
@@ -133,7 +162,7 @@ class SbgTcpReplayNode(Node):
         sock: socket.socket | None = None
         while rclpy.ok() and not self.stop_event.is_set():
             try:
-                sock = socket.create_connection((self.host, self.port), timeout=5.0)
+                sock = socket.create_connection((self.host, int(self.port)), timeout=5.0)
                 break
             except OSError:
                 time.sleep(self.connect_retry_sec)
@@ -141,7 +170,7 @@ class SbgTcpReplayNode(Node):
         if sock is None:
             return
 
-        self.get_logger().info(f"Connected to SBG bridge at {self.host}:{self.port}")
+        self.get_logger().info(f'Connected to SBG bridge at {self.host}:{int(self.port)}')
 
         try:
             last_t = None
@@ -167,7 +196,7 @@ class SbgTcpReplayNode(Node):
                     0.0,
                     0,  # heave_status
                 )
-                self.send_msg(sock, b"\x09", shipmotion)
+                self.send_msg(sock, b'\x09', shipmotion)
 
                 # GpsVel (0x0d) format: <LLL8f
                 gpsvel = (
@@ -183,7 +212,7 @@ class SbgTcpReplayNode(Node):
                     0.0,  # course
                     0.0,  # course_acc
                 )
-                self.send_msg(sock, b"\x0d", gpsvel)
+                self.send_msg(sock, b'\x0d', gpsvel)
 
                 # GpsPos (0x0e) format: <LLL3d4fBHH
                 gpspos = (
@@ -201,7 +230,7 @@ class SbgTcpReplayNode(Node):
                     0,  # base_station_id
                     0,  # diff_age
                 )
-                self.send_msg(sock, b"\x0e", gpspos)
+                self.send_msg(sock, b'\x0e', gpspos)
 
                 # Sleep based on timestamps (scaled)
                 t_now = int(np.asarray(t_us[i]).item())
@@ -221,7 +250,7 @@ class SbgTcpReplayNode(Node):
             try:
                 self.run_once()
             except Exception as e:
-                self.get_logger().error(f"SBG TCP replay failed: {e}")
+                self.get_logger().error(f'SBG TCP replay failed: {e}')
                 time.sleep(1.0)
 
             if not self.loop:
@@ -252,5 +281,5 @@ def main(args=None):
                 pass
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

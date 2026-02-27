@@ -3,6 +3,15 @@ Deterministic ocean wave prediction from sparse buoy data. This methodology and 
 phase-resolved reconstructions of ocean waves over short time-space scales using measurements of
 wave motion collected by sparse arrays of Surface Wave Instrument Floats w/ Tracking (SWIFTs). 
 
+## Frames and conventions
+
+The Python port expects positions and velocity components to share a consistent local Cartesian frame.
+
+- **Local horizontal frame**: $x$ is East (meters), $y$ is North (meters). $z$ is up-positive (meters).
+- **Horizontal velocities**: $u$ is East (m/s), $v$ is North (m/s).
+- **Simulation (`mbari_wec_gz`)**: incident-wave outputs are already in world ENU with $u/v$ = East/North; do not apply SWIFT-specific sign flips to sim data.
+- **Rotation (`rotation_deg`)**: applied to the lat/lon → x/y projection (clockwise-positive). If you set `rotation_deg != 0`, x/y are rotated but u/v are not automatically rotated in the pipeline; keep `rotation_deg: 0.0` unless you rotate u/v consistently.
+
 ## ROS 2
 Prerequisite: Follow installation steps to install ROS 2 on your machine.  
 (If you would like to skip installing ROS 2 for now, and just run an example, you may skip to

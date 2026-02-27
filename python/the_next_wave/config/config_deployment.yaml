@@ -1,0 +1,59 @@
+# Config to be used in deployment with real SWIFTs and the physical MBARI WEC power buoy
+/**:
+  ros__parameters:
+    # Deployment: swifts.* values are TCP ports, matching the port mapping from docs.
+    swifts:
+      swift22: 3003
+      swift23: 3004
+      swift24: 3001
+      swift25: 3002
+
+/the_next_wave_node:
+  ros__parameters:
+    # Raw SBG heave on real SWIFT is upside-down; apply correction.
+    flip_z_sign: true
+    # Keep x/y in East/North so u/v (vel_e/vel_n) stay consistent.
+    rotation_deg: 0.0
+    downsample_to_hz: 5.0
+    wavespec_update_period_sec: 300.0
+    dense_prediction_window: 50.0
+    wec_actual_history_sec: 50.0
+
+    # Least-squares solver tuning
+    lsq_ridge: 1.0e-6
+    lsq_max_iter: 60
+    lsq_use_spectrum_weighted_ridge: true
+    lsq_spectrum_ridge_floor: 1.0e-6
+    lsq_diagnostics_enable: false
+    lsq_near_bound_ratio: 0.95
+
+    # Optional MEM stabilization (disabled by default; diverges from MATLAB).
+    mem_moment_cap_enable: false
+    mem_moment_cap: 0.999
+
+    # In production, mbari wec target lat/lon should come from the AHRS topic.
+    # Keep example frame override off unless intentionally running without AHRS.
+    sbg_bridge_use_example_frame: false
+    sbg_bridge_bind: 0.0.0.0
+
+/the_next_wave_plotter_node:
+  ros__parameters:
+    prediction_topic: wave_predictions
+    max_points: 600
+    history_sec: 50.0
+
+/sbg_tcp_replay_swift22:
+  ros__parameters:
+    host: 127.0.0.1
+
+/sbg_tcp_replay_swift23:
+  ros__parameters:
+    host: 127.0.0.1
+
+/sbg_tcp_replay_swift24:
+  ros__parameters:
+    host: 127.0.0.1
+
+/sbg_tcp_replay_swift25:
+  ros__parameters:
+    host: 127.0.0.1

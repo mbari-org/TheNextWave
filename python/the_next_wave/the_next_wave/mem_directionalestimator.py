@@ -3,7 +3,8 @@ import numpy as np
 
 def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
     """
-    % function [NS,NE] = MEM_calc(a1,a2,b1,b2,en,convert)
+    % function [NS,NE] = MEM_calc(a1,a2,b1,b2,en,convert).
+
     %
     % This function calculates the Maximum Entropy Method estimate of
     % the Directional Distribution of a wave field.
@@ -28,28 +29,26 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
     %
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     % DESCRIPTION:
-    %   Function calculates directional distribution of a wave field using the 
-    %  Maximum Entropy Method of Lygre & Krogstad (JPO V16 1986). User passes the
-    %  directional moments (a1,b1,a2,b2) and energy density (en) to the function.
-    %  The directional moments are expected to be in a right hand coordinate 
-    %  system (i.e. north, west) with direction being the direction towards.
-    %  The returned energy and directional distributions have been converted to
-    %  nautical convention with direction being the direction from.
+    %   Function calculates directional distribution of a wave field using the
+    %  Maximum Entropy Method of Lygre & Krogstad (JPO V16 1986). User passes
+    %  the directional moments (a1,b1,a2,b2) and energy density (en) to the
+    %  function. The directional moments are expected to be in a right hand
+    %  coordinate system (i.e. north, west) with direction being the direction
+    %  towards. The returned energy and directional distributions have been
+    %  converted to nautical convention with direction being the direction from.
     %
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     % MODIFICATIONS
     %
-    %  Version: 1.1 - Directional moments converted to a column vector at 
+    %  Version: 1.1 - Directional moments converted to a column vector at
     %                 beginning of function (5/7/2003 - pfj)
     %
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     %
-
     %
     % calculate directional energy spectrum based on Maximum Entropy Method (MEM)
     % of Lygre & Krogstad, JPO V16 1986.
     """
-
     # switch to Krogstad notation
     d1 = np.asarray(a1)
     d2 = np.asarray(b1)
@@ -63,8 +62,8 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
     x1 = 1. - p1 * np.conj(c1) - p2 * np.conj(c2)
 
     # define directional domain, this is still in Datawell convention
-    dtheta = 2.
-    direc = np.arange(0., 360., dtheta)
+    dtheta = 2.0
+    direc = np.arange(0.0, 360.0, dtheta)
 
     # get distribution with "dtheta" degree resolution (still in right hand system)
     dr = np.pi / 180.
@@ -75,26 +74,20 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
         e2 = np.cos(2. * alpha) - np.sin(2. * alpha) * 1j
         y1 = np.abs(1. - p1 * e1 - p2 * e2)**2.
 
-        #S(:, n) is the directional distribution across all frequencies (:) and directions (n).
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        # S(:, n) is directional distribution across all frequencies and directions.
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
             S[:, n] = (x1 / y1)
     S = np.real(S)
-    S = np.where(np.isfinite(S), S, 0.0)
 
-    # normalize each frequency band by the total across all directions so that the integral of
-    # S(theta:f) is 1. Sn is the normalized directional distribution
-    Sn = np.zeros_like(S)
+    # normalize each frequency band by the total across all directions
+    # so that the integral of S(theta|f) is 1 (MATLAB uses radians here)
     tot = np.sum(S, axis=1) * dtheta * dr
-    # If tot is invalid/zero, fall back to a uniform distribution (1/(2*pi)).
-    uniform = 1.0 / (2.0 * np.pi)
+    Sn = np.zeros_like(S)
     for ii in range(len(en)):
-        if not np.isfinite(tot[ii]) or tot[ii] <= 0.0:
-            Sn[ii, :] = uniform
-        else:
-            Sn[ii, :] = S[ii, :] / tot[ii]
+        Sn[ii, :] = S[ii, :] / tot[ii]
 
-    # calculate energy density by multiplying the energies at each frequency by the normalized
-    # directional distribution at that frequency
+    # calculate energy density by multiplying the energies at each frequency
+    # by the normalized directional distribution at that frequency
     E = np.zeros_like(Sn)
     for ii in range(len(en)):
         E[ii, :] = Sn[ii, :] * en[ii]
@@ -106,20 +99,21 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
 
     else:
         # convert to a geographic coordinate frame
-        ndirec = np.abs(direc - 360.)
+        ndirec = np.abs(direc - 360.0)
         # convert from direction towards to direction from
-        ndirec = ndirec + 180.
-        ndirec[ndirec >= 360.] -= 360.
+        ndirec = ndirec + 180.0
+        ndirec[ndirec >= 360.0] -= 360.0
 
-        # the Energy and distribution (s) arrays now don't go from 0-360. They now goes from 180-5 and
+        # Energy/distribution arrays no longer run 0-360 directly after conversion.
         # then from 360-185. Create new Energy and distribution matrices that go from 0-360.
         NE = np.zeros_like(E)
         NS = np.zeros_like(Sn)
         for ii in range(len(direc)):
             ia = np.where(ndirec == direc[ii])[0]
             if ia.size > 0:
-                NE[:, ii] = E[:, ia]
-                NS[:, ii] = Sn[:, ia]
+                j = int(ia[0])
+                NE[:, ii] = E[:, j]
+                NS[:, ii] = Sn[:, j]
             else:
                 print('\n !!! Error converting to geographic coordinate frame !!!')
 

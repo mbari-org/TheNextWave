@@ -1,4 +1,5 @@
-"""Core near-realtime wave prediction pipeline (ROS-free).
+"""
+Core near-realtime wave prediction pipeline (ROS-free).
 
 This module mirrors the algorithmic flow in `example.py`, but is structured for
 streaming / near-realtime use:
@@ -22,7 +23,9 @@ from .reprocess_SBG import reprocess_swift_array
 from .swift import SBGData, SWIFTArray, WaveSpec
 from .utilities import (
     build_wavespec_from_swifts,
+    bulk_wave_params_from_wavespec,
     centroid_period_and_phase_speed,
+    format_bulk_wave_params,
     generic_coordinate_transform,
     load_raw_arrays_from_sbg,
 )
@@ -31,7 +34,18 @@ from .utilities import (
 @dataclass
 class TheNextWaveConfig:
     expected_fs: float = 5.0
+    # Rotation applied in the lat/lon -> local x/y projection (clockwise-positive).
+    # With rotation_deg == 0, x=East and y=North (meters). If rotation_deg != 0,
+    # x/y are rotated axes.
+    #
+    # Important: the current pipeline does not automatically rotate (u,v) when
+    # rotation_deg is nonzero. To avoid mixing frames, prefer rotation_deg == 0
+    # unless you also rotate (u,v) consistently upstream.
     rotation_deg: float = 0.0
+    # Real SWIFT SBG heave is mounted upside-down; negate to get "up-positive".
+    # For gz sim (or other sources that already publish z in the desired sign),
+    # set this False.
+    flip_z_sign: bool = True
     n_te: float = 10.0
     # If > 0, reuse the most recently computed usable wavespec until this
     # many seconds of (measurement) time have elapsed, then refresh.
@@ -40,6 +54,25 @@ class TheNextWaveConfig:
     # Only compute/publish dense_predictions_* for the last N seconds of the
     # measurement window. Set to 0 to use the full window.
     dense_prediction_window: float = 0.0
+    # If True, evaluate dense model output on provided WEC-history timestamps.
+    # If False, do not project the solved model onto history.
+    enable_dense_history_projection: bool = True
+
+    # Least-squares solver controls
+    lsq_ridge: float = 1e-6
+    lsq_max_iter: int = 60
+    # Use spectrum-derived per-component scale as a prior (MAP / weighted ridge).
+    # Default ON to discourage large cancelling coefficients that can blow up off-sensor.
+    lsq_use_spectrum_weighted_ridge: bool = True
+    lsq_spectrum_ridge_floor: float = 1e-6
+    # Optional diagnostics for constraint saturation.
+    lsq_diagnostics_enable: bool = False
+    lsq_near_bound_ratio: float = 0.95
+
+    # Optional stabilization for MATLAB MEM directional estimator.
+    # Disabled by default to preserve MATLAB-faithful behavior.
+    mem_moment_cap_enable: bool = False
+    mem_moment_cap: float = 0.999
 
 
 class TheNextWave:
@@ -58,8 +91,8 @@ class TheNextWave:
     def wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
         if ws is None:
             return False
-        f = np.asarray(getattr(ws, "f", np.array([])), dtype=float)
-        Etheta = np.asarray(getattr(ws, "Etheta", np.array([])), dtype=float)
+        f = np.asarray(getattr(ws, 'f', np.array([])), dtype=float)
+        Etheta = np.asarray(getattr(ws, 'Etheta', np.array([])), dtype=float)
         if f.size == 0 or Etheta.size == 0:
             return False
         if not np.all(np.isfinite(f)):
@@ -68,46 +101,69 @@ class TheNextWave:
         finite_energy = Etheta[np.isfinite(Etheta)]
         return finite_energy.size > 0 and float(np.nansum(finite_energy)) > 0.0
 
-    def process(self, swifts: SWIFTArray, wec_lat: float | None = None, wec_lon: float | None = None) -> dict:
-        """Run wave spectral analysis and prediction.
+    def process(
+        self,
+        swifts: SWIFTArray,
+        wec_lat: float | None = None,
+        wec_lon: float | None = None,
+        dense_eval_time_s: np.ndarray | None = None,
+    ) -> dict:
+        """
+        Run wave spectral analysis and prediction.
 
-        Args:
-            swifts: SWIFTArray containing SBG windows (sbg22-25)
-            wec_lat/wec_lon: WEC buoy target position. If missing, target defaults
-                to the origin (0,0) of the local projection.
+        Parameters
+        ----------
+        swifts : SWIFTArray
+            SWIFTArray containing SBG windows (sbg22-25).
+        wec_lat : float | None, optional
+            WEC buoy target latitude. If missing, target defaults to the
+            origin (0,0) of the local projection.
+        wec_lon : float | None, optional
+            WEC buoy target longitude. If missing, target defaults to the
+            origin (0,0) of the local projection.
+        dense_eval_time_s : ndarray | None, optional
+            Optional absolute timestamps at which to evaluate dense model output
+            (e.g., WEC actual-history times). If omitted, uses measurement times.
 
-        Returns:
+        Returns
+        -------
             Results dictionary containing the intermediate products (cleaned SBG,
             spectrum, recon) and the final predictions.
+
         """
-        results: dict[str, Any] = {"wave_stats": {}}
+        results: dict[str, Any] = {'wave_stats': {}}
 
         cleaned_sbg, swift_structs = reprocess_swift_array(swifts, fs=self.config.expected_fs)
 
         # Wave statistics per buoy (from reprocess_swift_array outputs)
         for sid in range(22, 26):
-            swift_name = f"swift{sid}"
+            swift_name = f'swift{sid}'
             swift_data = getattr(swift_structs, swift_name, None)
-            if swift_data is None or getattr(swift_data, "sigwaveheight", np.array([])).size == 0:
+            if swift_data is None or getattr(swift_data, 'sigwaveheight', np.array([])).size == 0:
                 continue
 
             Hs = float(swift_data.sigwaveheight[0])
             Tp = float(swift_data.peakwaveperiod[0])
             Dp = float(swift_data.peakwavedirT[0])
-            results["wave_stats"][swift_name] = {"Hs": Hs, "Tp": Tp, "Dp": Dp}
+            results['wave_stats'][swift_name] = {'Hs': Hs, 'Tp': Tp, 'Dp': Dp}
 
         zin, uin, vin, tin, xin, yin, fs = self.stack_measurement_data(cleaned_sbg)
         fs = float(fs)
         if not np.isfinite(fs) or fs <= 0.0:
             if self.logger is not None:
-                self.logger.warn(f"Invalid fs={fs}; falling back to expected_fs={self.config.expected_fs}")
+                self.logger.warn(
+                    f'Invalid fs={fs}; falling back to expected_fs={self.config.expected_fs}'
+                )
             fs = float(self.config.expected_fs)
 
         # Decide whether to refresh the wavespec.
         # Use the measurement time base (tin) to determine age.
         current_t_s = float(np.nanmax(tin)) if np.size(tin) else 0.0
         use_cached = False
-        if self.config.wavespec_update_period_sec > 0.0 and self.wavespec_is_usable(self.last_wavespec):
+        if (
+            self.config.wavespec_update_period_sec > 0.0
+            and self.wavespec_is_usable(self.last_wavespec)
+        ):
             if self.last_wavespec_time_s is not None and np.isfinite(current_t_s):
                 age_s = current_t_s - float(self.last_wavespec_time_s)
                 use_cached = age_s >= 0.0 and age_s < float(self.config.wavespec_update_period_sec)
@@ -122,16 +178,45 @@ class TheNextWave:
             wavespec = wavespec_new
             self.last_wavespec = wavespec_new
             self.last_wavespec_time_s = current_t_s
+
+            if self.logger is not None:
+                # Per-buoy bulk stats come from SBGwaves outputs stored into swift_structs
+                # during reprocess_swift_array().
+                for swift_name, stats in results.get('wave_stats', {}).items():
+                    try:
+                        Hs = float(stats.get('Hs'))
+                        Tp = float(stats.get('Tp'))
+                        Dp = float(stats.get('Dp'))
+                        if np.isfinite(Hs) or np.isfinite(Tp) or np.isfinite(Dp):
+                            self.logger.info(
+                                f'{swift_name} (SBGwaves): '
+                                f'Hs={Hs:.2f} m, Tp={Tp:.2f} s, Dp={Dp:.1f} deg'
+                            )
+                    except Exception:
+                        pass
+
+                self.logger.info(
+                    format_bulk_wave_params(
+                        bulk_wave_params_from_wavespec(wavespec_new),
+                        'wavespec (SWIFTdirectionalspectra avg)',
+                    )
+                )
         elif self.wavespec_is_usable(self.last_wavespec):
             wavespec = self.last_wavespec
             if self.logger is not None:
-                self.logger.warn("No usable wavespec from current window; reusing last valid wavespec")
+                self.logger.warn(
+                    'No usable wavespec from current window; reusing last valid wavespec'
+                )
         else:
-            raise ValueError("No usable wavespec available yet (SBGwaves may still be failing / low energy)")
+            raise ValueError(
+                'No usable wavespec available yet (SBGwaves may still be failing / low energy)'
+            )
 
         Te, ce = centroid_period_and_phase_speed(wavespec)
         if not np.isfinite(Te) or Te <= 0.0:
-            raise ValueError("Computed centroid period Te is invalid (spectrum has zero/NaN energy)")
+            raise ValueError(
+                'Computed centroid period Te is invalid (spectrum has zero/NaN energy)'
+            )
 
         # Match example.py: solve using ~NTe*Te seconds of data (here we take the most recent)
         n_total = int(zin.shape[0])
@@ -148,8 +233,8 @@ class TheNextWave:
         else:
             if self.lat_origin is None or self.lon_origin is None:
                 # This should be set by stack_measurement_data; keep safe fallback.
-                self.lat_origin = float(np.asarray(getattr(cleaned_sbg, "sbg22").GpsPos.lat)[0])
-                self.lon_origin = float(np.asarray(getattr(cleaned_sbg, "sbg22").GpsPos.long)[0])
+                self.lat_origin = float(np.asarray(getattr(cleaned_sbg, 'sbg22').GpsPos.lat)[0])
+                self.lon_origin = float(np.asarray(getattr(cleaned_sbg, 'sbg22').GpsPos.long)[0])
 
             x_target, y_target = generic_coordinate_transform(
                 wec_lat,
@@ -162,7 +247,9 @@ class TheNextWave:
             y_target = float(np.asarray(y_target).reshape(-1)[0])
 
         # Lead time from maximum sensor-to-target distance and phase speed
-        dist = np.sqrt((xin[input_slice, :] - x_target) ** 2 + (yin[input_slice, :] - y_target) ** 2)
+        dist = np.sqrt(
+            (xin[input_slice, :] - x_target) ** 2 + (yin[input_slice, :] - y_target) ** 2
+        )
         max_target_distance = float(np.nanmax(dist))
         leadtime = float(max_target_distance / ce) if ce and np.isfinite(ce) else 0.0
 
@@ -203,30 +290,50 @@ class TheNextWave:
             ypred.reshape((-1, 1)),
             ws,
             A0=self.A0,
+            ridge=float(self.config.lsq_ridge),
+            max_iter=int(self.config.lsq_max_iter),
+            use_spectrum_weighted_ridge=bool(self.config.lsq_use_spectrum_weighted_ridge),
+            spectrum_ridge_floor=float(self.config.lsq_spectrum_ridge_floor),
+            diagnostics=bool(self.config.lsq_diagnostics_enable),
+            near_bound_ratio=float(self.config.lsq_near_bound_ratio),
         )
         self.A0 = params.A
 
-        prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order="F")
+        prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
         zout = prediction[:, 0]
         uout = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(zout)
         vout = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(zout)
 
-        # Dense model evaluation at the target (WEC) for measurement timestamps.
-        # This provides high-rate model-vs-actual comparison without changing the
-        # future prediction time grid.
-        t_now = np.asarray(tin[input_slice, :], dtype=float)
-        if t_now.ndim == 2 and t_now.shape[1] > 0:
-            t_now = t_now[:, 0]
-        t_now = t_now.reshape((-1,))
+        # Dense model evaluation at the target (WEC).
+        # When disabled, do not apply the solved model to any history/time series.
+        t_now = np.array([], dtype=float)
+        if self.config.enable_dense_history_projection:
+            # If explicit timestamps are provided (e.g., WEC history), use those;
+            # otherwise fall back to measurement timestamps.
+            if dense_eval_time_s is not None:
+                t_now = np.asarray(dense_eval_time_s, dtype=float).reshape((-1,))
+                if t_now.size:
+                    t_now = t_now[np.isfinite(t_now)]
+                    t_now = t_now[t_now <= t_end]
+            else:
+                t_now = np.asarray(tin[input_slice, :], dtype=float)
+                if t_now.ndim == 2 and t_now.shape[1] > 0:
+                    t_now = t_now[:, 0]
+                t_now = t_now.reshape((-1,))
 
         # Optionally clip dense predictions to the last N seconds of the window.
-        dpw = float(self.config.dense_prediction_window) if np.isfinite(self.config.dense_prediction_window) else 0.0
-        if dpw > 0.0 and t_now.size and np.all(np.isfinite(t_now)):
-            t_end_now = float(np.nanmax(t_now))
-            t_min_now = t_end_now - dpw
-            keep = t_now >= t_min_now
-            if np.any(keep):
-                t_now = t_now[keep]
+        if self.config.enable_dense_history_projection:
+            dpw = (
+                float(self.config.dense_prediction_window)
+                if np.isfinite(self.config.dense_prediction_window)
+                else 0.0
+            )
+            if dpw > 0.0 and t_now.size and np.all(np.isfinite(t_now)):
+                t_end_now = float(np.nanmax(t_now))
+                t_min_now = t_end_now - dpw
+                keep = t_now >= t_min_now
+                if np.any(keep):
+                    t_now = t_now[keep]
 
         dense_predictions_time = np.array([], dtype=float)
         dense_predictions_z = np.array([], dtype=float)
@@ -234,10 +341,10 @@ class TheNextWave:
         dense_predictions_v = np.array([], dtype=float)
 
         try:
-            kx = np.asarray(getattr(params, "kx", np.array([])), dtype=float).reshape((-1,))
-            ky = np.asarray(getattr(params, "ky", np.array([])), dtype=float).reshape((-1,))
-            omega = np.asarray(getattr(params, "omega", np.array([])), dtype=float).reshape((-1,))
-            A = np.asarray(getattr(params, "A", np.array([])), dtype=float).reshape((-1,))
+            kx = np.asarray(getattr(params, 'kx', np.array([])), dtype=float).reshape((-1,))
+            ky = np.asarray(getattr(params, 'ky', np.array([])), dtype=float).reshape((-1,))
+            omega = np.asarray(getattr(params, 'omega', np.array([])), dtype=float).reshape((-1,))
+            A = np.asarray(getattr(params, 'A', np.array([])), dtype=float).reshape((-1,))
             ncomp = int(kx.size)
             if ncomp > 0 and A.size == 2 * ncomp and t_now.size > 0:
                 x = np.full((t_now.size, 1), float(x_target), dtype=float)
@@ -259,7 +366,7 @@ class TheNextWave:
                 u_nc = np.zeros_like(z_nc)
                 v_nc = np.zeros_like(z_nc)
 
-                if bool(getattr(params, "use_vel", False)):
+                if bool(getattr(params, 'use_vel', False)):
                     kn = np.sqrt(kx * kx + ky * ky)
                     kn[kn == 0.0] = np.nan
                     cu = (kx / kn) * omega
@@ -280,73 +387,88 @@ class TheNextWave:
             pass
 
         nbuoys = int(zin.shape[1])
-        reconstruction = np.asarray(recon_vec).reshape((win_len, -1), order="F")
+        reconstruction = np.asarray(recon_vec).reshape((win_len, -1), order='F')
         zr = reconstruction[:, 0:nbuoys]
-        ur = reconstruction[:, nbuoys : 2 * nbuoys]
-        vr = reconstruction[:, 2 * nbuoys : 3 * nbuoys]
+        ur = reconstruction[:, nbuoys:2 * nbuoys]
+        vr = reconstruction[:, 2 * nbuoys:3 * nbuoys]
 
         results.update(
             {
-                "cleaned_sbg": cleaned_sbg,
-                "swift_structs": swift_structs,
-                "wavespec": wavespec,
-                "Te": float(Te),
-                "ce": float(ce),
-                "fs": float(fs),
-                "window_start_time": t_start,
-                "window_end_time": t_end,
-                "n_samples": int(win_len),
-                "n_buoys": int(nbuoys),
-                "lat_origin": self.lat_origin,
-                "lon_origin": self.lon_origin,
-                "rotation_deg": float(self.config.rotation_deg),
-                "x_target": float(x_target),
-                "y_target": float(y_target),
-                "max_target_distance": max_target_distance,
-                "leadtime": float(leadtime),
-                "t_pred": tpred,
-                "z_pred": zout,
-                "u_pred": uout,
-                "v_pred": vout,
-                "dense_predictions_time": dense_predictions_time,
-                "dense_predictions_z": dense_predictions_z,
-                "dense_predictions_u": dense_predictions_u,
-                "dense_predictions_v": dense_predictions_v,
-                "t_meas": tin[input_slice, :],
-                "x_meas": xin[input_slice, :],
-                "y_meas": yin[input_slice, :],
-                "z_meas": zin[input_slice, :],
-                "u_meas": uin[input_slice, :],
-                "v_meas": vin[input_slice, :],
-                "z_recon": zr,
-                "u_recon": ur,
-                "v_recon": vr,
-                "params": params,
-                "solve_time": float(solve_time),
+                'cleaned_sbg': cleaned_sbg,
+                'swift_structs': swift_structs,
+                'wavespec': wavespec,
+                'Te': float(Te),
+                'ce': float(ce),
+                'fs': float(fs),
+                'window_start_time': t_start,
+                'window_end_time': t_end,
+                'n_samples': int(win_len),
+                'n_buoys': int(nbuoys),
+                'lat_origin': self.lat_origin,
+                'lon_origin': self.lon_origin,
+                'rotation_deg': float(self.config.rotation_deg),
+                'x_target': float(x_target),
+                'y_target': float(y_target),
+                'max_target_distance': max_target_distance,
+                'leadtime': float(leadtime),
+                't_pred': tpred,
+                'z_pred': zout,
+                'u_pred': uout,
+                'v_pred': vout,
+                'dense_predictions_time': dense_predictions_time,
+                'dense_predictions_z': dense_predictions_z,
+                'dense_predictions_u': dense_predictions_u,
+                'dense_predictions_v': dense_predictions_v,
+                't_meas': tin[input_slice, :],
+                'x_meas': xin[input_slice, :],
+                'y_meas': yin[input_slice, :],
+                'z_meas': zin[input_slice, :],
+                'u_meas': uin[input_slice, :],
+                'v_meas': vin[input_slice, :],
+                'z_recon': zr,
+                'u_recon': ur,
+                'v_recon': vr,
+                'params': params,
+                'solve_time': float(solve_time),
             }
         )
 
         return results
 
     def stack_measurement_data(self, cleaned_sbg: SWIFTArray) -> tuple[np.ndarray, ...]:
+        """Stack buoy measurement windows into solver-ready matrices.
+
+        Frame conventions:
+        - `xin/yin` are local Cartesian positions in meters (see `rotation_deg`).
+        - `uin/vin` are expected to be East/North velocities in m/s.
+        - `zin` is expected to be up-positive (meters) after applying `flip_z_sign`.
+
+        To keep (x,y) consistent with (u,v), prefer `rotation_deg = 0`.
+        """
         sbgs: list[SBGData] = []
         for swift_num in range(22, 26):
-            sbg = getattr(cleaned_sbg, f"sbg{swift_num}", None)
+            sbg = getattr(cleaned_sbg, f'sbg{swift_num}', None)
             if sbg is not None and len(sbg.ShipMotion.heave) > 0:
                 sbgs.append(sbg)
 
         if not sbgs:
-            raise ValueError("No valid SBG data found")
+            raise ValueError('No valid SBG data found')
 
         if self.lat_origin is None or self.lon_origin is None:
             self.lat_origin = float(np.asarray(sbgs[0].GpsPos.lat, dtype=float)[0])
             self.lon_origin = float(np.asarray(sbgs[0].GpsPos.long, dtype=float)[0])
 
-        return load_raw_arrays_from_sbg(sbgs, self.lat_origin, self.lon_origin, self.config.rotation_deg)
+        return load_raw_arrays_from_sbg(
+            sbgs,
+            self.lat_origin,
+            self.lon_origin,
+            self.config.rotation_deg,
+            flip_z_sign=bool(self.config.flip_z_sign),
+        )
 
     def build_averaged_wavespec(self, swift_structs: SWIFTArray) -> WaveSpec:
         swifts = []
-        for swift_name in ("swift22", "swift23", "swift24", "swift25"):
+        for swift_name in ('swift22', 'swift23', 'swift24', 'swift25'):
             swift_data = getattr(swift_structs, swift_name, None)
             if swift_data is not None and swift_data.wavespectra.energy.size > 0:
                 swifts.append(swift_data)
@@ -358,4 +480,14 @@ class TheNextWave:
             ws.Etheta = np.array([[]])
             return ws
 
-        return build_wavespec_from_swifts(swifts, recip=True)
+        mem_cap = None
+        if bool(self.config.mem_moment_cap_enable):
+            mem_cap = float(self.config.mem_moment_cap)
+        # MATLAB SWIFTdirectionalspectra's `recip` flag is asymmetric:
+        # - It flips the Etheta/theta axis when `recip=True`.
+        # - It flips the moment-derived `dir` output when `recip=False`.
+        #
+        # The rest of this codebase treats `wavespec.theta` as compass degrees True
+        # that waves are coming FROM (and the plotter draws TO = FROM + 180).
+        # Therefore we request the theta convention that yields FROM directions here.
+        return build_wavespec_from_swifts(swifts, recip=False, mem_moment_cap=mem_cap)

@@ -1,12 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass
+
 from typing import Iterable, Tuple
+
 import numpy as np
 from scipy import signal
-
-# filepath: /home/anderson/wec/igngzb/openrobotics/workspace/src/TheNextWave/python/the_next_wave/the_next_wave/sbg_waves.py
-
-
 
 
 def sbg_waves(
@@ -51,7 +48,7 @@ def sbg_waves(
     heave = np.asarray(heave, dtype=float).ravel()
 
     if not (u.size == v.size == heave.size):
-        raise ValueError("u, v, and heave must have the same length")
+        raise ValueError('u, v, and heave must have the same length')
 
     pts = int(u.size)
     w = int(np.round(fs * wsecs))
@@ -70,7 +67,18 @@ def sbg_waves(
     # MATLAB: f = 1/(wsecs) + bandwidth/2 + bandwidth.*(0:(n-1))
     f = (1.0 / wsecs) + (bandwidth / 2.0) + bandwidth * np.arange(n, dtype=float)
 
-    def invalid_outputs() -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def invalid_outputs() -> Tuple[
+        float,
+        float,
+        float,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
         f_out = f[f <= fmax].copy()
         nf = int(f_out.size)
         fill = np.full((nf,), 9999.0, dtype=float)
@@ -126,9 +134,9 @@ def sbg_waves(
         zw[:, q] = heave[start:end]
 
     # --- Detrend each window ---
-    uw = signal.detrend(uw, axis=0, type="linear")
-    vw = signal.detrend(vw, axis=0, type="linear")
-    zw = signal.detrend(zw, axis=0, type="linear")
+    uw = signal.detrend(uw, axis=0, type='linear')
+    vw = signal.detrend(vw, axis=0, type='linear')
+    zw = signal.detrend(zw, axis=0, type='linear')
 
     # --- Taper and rescale (preserve variance) ---
     taper = np.sin(np.arange(1, w + 1, dtype=float) * np.pi / w).reshape(-1, 1)
@@ -139,7 +147,7 @@ def sbg_waves(
     zw_t = zw * taper
 
     # MATLAB var uses N-1 by default; ratio mostly cancels, but match via ddof=1.
-    with np.errstate(invalid="ignore", divide="ignore"):
+    with np.errstate(invalid='ignore', divide='ignore'):
         fact_u = np.sqrt(np.var(uw, axis=0, ddof=1) / np.var(uw_t, axis=0, ddof=1))
         fact_v = np.sqrt(np.var(vw, axis=0, ddof=1) / np.var(vw_t, axis=0, ddof=1))
         fact_z = np.sqrt(np.var(zw, axis=0, ddof=1) / np.var(zw_t, axis=0, ddof=1))
@@ -215,21 +223,21 @@ def sbg_waves(
 
     # --- Convert to displacement spectra from GPS velocities ---
     w_rad = 2.0 * np.pi * f
-    with np.errstate(divide="ignore", invalid="ignore"):
+    with np.errstate(divide='ignore', invalid='ignore'):
         Exx = UU / (w_rad**2)
         Eyy = VV / (w_rad**2)
         Ezz = ZZ
 
-        Qxz = np.imag(UZ) / (w_rad**1)
+        Qxz = np.imag(UZ) / (w_rad**1)  # noqa: F841
         Cxz = np.real(UZ) / (w_rad**1)
 
-        Qyz = np.imag(VZ) / (w_rad**1)
+        Qyz = np.imag(VZ) / (w_rad**1)  # noqa: F841
         Cyz = np.real(VZ) / (w_rad**1)
 
         Cxy = np.real(UV) / (w_rad**2)
 
     # --- Wave spectral moments ---
-    with np.errstate(divide="ignore", invalid="ignore"):
+    with np.errstate(divide='ignore', invalid='ignore'):
         denom1 = np.sqrt((Exx + Eyy) * Ezz)
         a1 = Cxz / denom1
         b1 = Cyz / denom1
@@ -241,7 +249,7 @@ def sbg_waves(
     # dir2 = np.arctan2(b2, a2) / 2.0  # computed but unused (kept for parity)
 
     # Orbit shape check
-    with np.errstate(divide="ignore", invalid="ignore"):
+    with np.errstate(divide='ignore', invalid='ignore'):
         check = Ezz / (Eyy + Exx)
 
     E = Ezz.copy()

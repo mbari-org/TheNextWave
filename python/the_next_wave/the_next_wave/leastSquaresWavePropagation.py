@@ -1,23 +1,34 @@
-import numpy as np
-trapz = getattr(np, 'trapz', np.trapezoid)
 import sys
-import scipy.stats as sps
-import scipy.optimize as spo
+import time
+
+import numpy as np
 import scipy.interpolate as spint
-import scipy.linalg as splin
+import scipy.optimize as spo
+import scipy.stats as sps
 
 from .swift import LSQWavePropParams
 
+trapz = getattr(np, 'trapz', np.trapezoid)
 
-def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
-    '''
-    Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub
+
+def solve_box_ridge_lbfgsb(
+    P,
+    b,
+    lb,
+    ub,
+    x0=None,
+    ridge=1e-6,
+    max_iter=80,
+    ridge_sigma_x=None,
+):
+    """
+    Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub.
 
     Uses:
       - row scaling (improves conditioning)
       - column scaling (improves conditioning)
       - L-BFGS-B (fast, supports warm start via x0)
-    '''
+    """
     # Row scaling: scale each row by its RMS to avoid huge disparities
     row_rms = np.sqrt(np.mean(P * P, axis=1))
     row_rms[row_rms == 0.0] = 1.0
@@ -35,19 +46,26 @@ def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
     if x0 is not None:
         x0 = np.asarray(x0, dtype=float).reshape(-1)
         if x0.size == 0:
-            print("WARNING: warm-start A0 provided but empty; starting from zeros", file=sys.stderr, flush=True)
+            print(
+                'WARNING: warm-start A0 provided but empty; starting from zeros',
+                file=sys.stderr,
+                flush=True,
+            )
             x0 = None
         elif not np.all(np.isfinite(x0)):
             n_bad = int(np.size(x0) - np.count_nonzero(np.isfinite(x0)))
             print(
-                f"WARNING: warm-start A0 contains non-finite values ({n_bad} bad / {x0.size}); starting from zeros",
+                'WARNING: warm-start A0 contains non-finite values '
+                f'({n_bad} bad / {x0.size}); starting from zeros',
                 file=sys.stderr,
                 flush=True,
             )
             x0 = None
         elif x0.shape[0] != P.shape[1]:
             print(
-                f"WARNING: warm-start A0 length mismatch (len(A0)={x0.shape[0]} vs n_cols={P.shape[1]}); starting from zeros",
+                'WARNING: warm-start A0 length mismatch '
+                f'(len(A0)={x0.shape[0]} vs n_cols={P.shape[1]}); '
+                'starting from zeros',
                 file=sys.stderr,
                 flush=True,
             )
@@ -64,13 +82,32 @@ def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
 
     xs0 = np.minimum(np.maximum(xs0, lb_s), ub_s)
 
+    # Optional spectrum-weighted ridge (MAP prior): penalize physical x scaled by sigma.
+    # penalty = 0.5 * ridge * sum((x / sigma_x)^2), where x = xs / col_rms
+    # => in scaled variables: sum((xs / (col_rms * sigma_x))^2)
+    ridge_xs_scale2 = None
+    if ridge_sigma_x is not None:
+        ridge_sigma_x = np.asarray(ridge_sigma_x, dtype=float).reshape(-1)
+        if ridge_sigma_x.shape[0] != P.shape[1]:
+            raise ValueError(
+                'ridge_sigma_x length mismatch '
+                f'(len={ridge_sigma_x.shape[0]} vs n_cols={P.shape[1]})'
+            )
+        denom = col_rms * ridge_sigma_x
+        denom[denom == 0.0] = 1.0
+        ridge_xs_scale2 = 1.0 / (denom * denom)
+
     def fun(xs):
         r = Ps @ xs - bw
-        return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
+        if ridge_xs_scale2 is None:
+            return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
+        return 0.5 * (r @ r) + 0.5 * ridge * np.sum((xs * xs) * ridge_xs_scale2)
 
     def jac(xs):
         r = Ps @ xs - bw
-        return Ps.T @ r + ridge * xs
+        if ridge_xs_scale2 is None:
+            return Ps.T @ r + ridge * xs
+        return Ps.T @ r + ridge * (xs * ridge_xs_scale2)
 
     bounds = list(zip(lb_s, ub_s))
 
@@ -80,7 +117,7 @@ def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
         jac=jac,
         method='L-BFGS-B',
         bounds=bounds,
-        options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-6}
+        options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-6},
     )
 
     xs = res.x
@@ -88,12 +125,30 @@ def solve_box_ridge_lbfgsb(P, b, lb, ub, x0=None, ridge=1e-6, max_iter=80):
     return x, res
 
 
-
-
-def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0=None):
+def leastSquaresWavePropagation(
+    z1,
+    u1,
+    v1,
+    t1,
+    x1,
+    y1,
+    t2,
+    x2,
+    y2,
+    wavespec,
+    A0=None,
+    ridge=1e-6,
+    max_iter=60,
+    use_spectrum_weighted_ridge=True,
+    spectrum_ridge_floor=1e-6,
+    diagnostics=False,
+    near_bound_ratio=0.95,
+):
     """
-    Phase-resolved prediction of sea surface elevation at a specified time & location
-    using an inverse linear model, following the MATLAB LSQ wave propagation method.
+    Phase-resolved prediction of sea surface elevation.
+
+    At a specified time & location using an inverse linear model, following
+    the MATLAB LSQ wave propagation method.
 
     Parameters
     ----------
@@ -115,8 +170,10 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
           - Etheta : 2D array, directional wave spectrum (freq × direction)
           - f      : 1D array, frequencies [Hz]
           - theta  : 1D array, directions [deg, nautical convention]
-    """
+    A0 : array-like, optional
+        Warm-start amplitudes from the previous solve.
 
+    """
     if len(u1) > 0 and len(v1) > 0:
         use_vel = True
     else:
@@ -134,7 +191,7 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     idx_last = []
     for v in unique_vals:
         idxs = np.where(theta_deg == v)[0]
-        idx_last.append(idxs[-1])       # last occurrence
+        idx_last.append(idxs[-1])  # last occurrence
     idx_last = np.array(idx_last, dtype=int)
 
     theta_u = unique_vals
@@ -150,7 +207,7 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
 
     E_for_peak = wavespec.Etheta
     n_freq, n_dir = E_for_peak.shape
-    flat_F = E_for_peak.flatten(order="F")
+    flat_F = E_for_peak.flatten(order='F')
     idx_flat = int(np.argmax(flat_F))
     col_idx = idx_flat // n_freq
     DTp = np.deg2rad(wavespec.theta[col_idx])  # radians
@@ -163,27 +220,27 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     mask = (df * wavespec.E) / np.max(df * wavespec.E) >= 0.05
     frange_idx = np.nonzero(mask)[0]
     if frange_idx.size == 0:
-        raise RuntimeError("No frequencies satisfy 5% cutoff")
+        raise RuntimeError('No frequencies satisfy 5% cutoff')
 
     omega = np.logspace(
         np.log10(f[frange_idx[0]]),
         np.log10(f[frange_idx[-1]]),
-        40
+        40,
     ) * 2.0 * np.pi
     k = omega**2 / 9.81  # (40,)
 
     # 25 directions around DTp
-    theta = np.linspace(DTp - np.pi/2.0, DTp + np.pi/2.0, 25)
-    theta[theta > 2.0*np.pi] -= 2.0*np.pi
-    theta[theta < 0.0]      += 2.0*np.pi
+    theta = np.linspace(DTp - np.pi / 2.0, DTp + np.pi / 2.0, 25)
+    theta[theta > 2.0 * np.pi] -= 2.0 * np.pi
+    theta[theta < 0.0] += 2.0 * np.pi
     theta = np.sort(theta)  # (25,)
 
     # Reshape, build kx, ky, omega
-    #print(f'{DTp=}')
+    # print(f'{DTp=}')
     k = k.flatten(order='F')
-    #print(f'{k.mean()=}')
+    # print(f'{k.mean()=}')
     theta = theta.flatten(order='F')
-    #print(f'{theta=}')
+    # print(f'{theta=}')
 
     kx = np.outer(k, np.sin(theta))
     ky = np.outer(k, np.cos(theta))
@@ -215,20 +272,20 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     f2, thet2 = np.meshgrid(np.sqrt(k * 9.8), theta)     # target grid
     points = np.column_stack((F.ravel(), T.ravel()))
     values = np.log10(wavespec.Etheta.T).ravel()
-    xi = (f2 / (2. * np.pi), np.degrees(thet2))
+    xi = (f2 / (2.0 * np.pi), np.degrees(thet2))
     zi_log = spint.griddata(points, values, xi, method='linear')
     Ei = 10.0 ** zi_log
     Ei[np.isnan(Ei)] = 0.0
 
     Ei *= trapz(wavespec.E, x=wavespec.f, axis=0) / trapz(
         trapz(Ei, x=np.degrees(thet2[:, 0]), axis=0),
-        x=f2[0, :] / (2. * np.pi),
-        axis=0
+        x=f2[0, :] / (2.0 * np.pi),
+        axis=0,
     )
 
     amps = np.sqrt(
         Ei * np.diff(
-            f2[0, :] / (2. * np.pi),
+            f2[0, :] / (2.0 * np.pi),
             prepend=0.0
         ) * sps.mode(
             np.diff(np.degrees(thet2[:, 0])),
@@ -247,9 +304,9 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     y1 = y1.reshape((-1, 1), order='F')
     y2 = y2.reshape((-1, 1), order='F')
     kx = kx.reshape((-1, 1), order='F')
-    #print(f'{kx.mean()=}')
+    # print(f'{kx.mean()=}')
     ky = ky.reshape((-1, 1), order='F')
-    #print(f'{ky.mean()=}')
+    # print(f'{ky.mean()=}')
     t1 = t1.reshape((-1, 1), order='F')
     t2 = t2.reshape((-1, 1), order='F')
     omega = omega.reshape((-1, 1), order='F')
@@ -304,107 +361,88 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
     else:
         b = np.asarray(z1).ravel(order='F')
 
-    #print(f'{P1.shape=}')
-    #print(f'{P2.mean()=}')
-    #print(f'{b.mean()=}')
+    # print(f'{P1.shape=}')
+    # print(f'{P2.mean()=}')
+    # print(f'{b.mean()=}')
 
-    """
-    PtP = P1.T @ P1     # shape (2000×2000)
-    # Condition number estimate using 2-norm (SVD)
-    u, s, vt = np.linalg.svd(PtP)
-    cond_number = s[0] / s[-1]
-    print("cond(P1.T@P1) =", cond_number)
-    print("smallest singular val =", s[-1])
-    print("largest singular val  =", s[0])
-
-    rank_est = np.linalg.matrix_rank(P1, tol=1e-10)
-    print("matrix_rank(P1) =", rank_est, "out of", P1.shape[1])
-
-    # singular values of P1 (economy SVD)
-    u, s, vt = np.linalg.svd(P1, full_matrices=False)
-    import matplotlib.pyplot as plt
-    plt.semilogy(s)
-    plt.title("Singular values of P1")
-    plt.show()
-
-    nz = np.count_nonzero(P1)
-    tot = P1.size
-    print("sparsity =", 1 - nz / tot)
-
-    # Normalize columns to unit length
-    Pnorm = P1 / np.linalg.norm(P1, axis=0, keepdims=True)
-    # Compute correlation of first 20 columns
-    C = Pnorm[:, :20].T @ Pnorm[:, :20]
-    print(C)
-
-    C_full = Pnorm.T @ Pnorm
-    max_corr = np.max(C_full - np.eye(C_full.shape[0]))
-    print("max off-diagonal correlation =", max_corr)
-
-    Q, R = np.linalg.qr(P1)
-    rank_qr = np.sum(np.abs(np.diag(R)) > 1e-10)
-    print("QR rank =", rank_qr)
-    """
-
-    import time
     t_0 = time.time()
 
-    """
-    Q, R, piv = splin.qr(P1, mode='economic', pivoting=True)
-    tol = np.max(P1.shape) * R[0,0] * 1e-12
-    print(f'{tol=}')
-    r = np.sum(np.abs(np.diag(R)) > tol)
-    P1r = P1[:, piv[:r]]
-    amps_r = amps[piv[:r]]
-
-    lower = -amps_r / np.sqrt(2)
-    upper =  amps_r / np.sqrt(2)
-
-    result = spo.lsq_linear(
-        P1r,
-        b,
-        bounds=(lower, upper),
-        method="trf",        # <-- MATLAB equivalent
-        lsq_solver="lsmr",   # <-- Efficient iterative solver
-        max_iter=100,        # <-- You can adjust
-        verbose=1
-    )
-
-    A_r = result.x  # reduced solution (r,)
-    A = np.zeros(P1.shape[1])
-    A[piv[:r]] = A_r
-    """
-
     lb = -amps / np.sqrt(2.0)
-    ub =  amps / np.sqrt(2.0)
+    ub = amps / np.sqrt(2.0)
+
+    ridge_sigma_x = None
+    if use_spectrum_weighted_ridge:
+        # Use the spectrum-derived coefficient scale as a prior std-dev for each component.
+        # This is physically motivated: low-energy components should have small coefficients.
+        # Use the same scale used by the box bounds (ub) so the prior matches the constraint.
+        ridge_sigma_x = np.maximum(np.asarray(ub, dtype=float), float(spectrum_ridge_floor))
 
     A, info = solve_box_ridge_lbfgsb(
         P1,
         b,
         lb,
         ub,
-        x0=A0,          # pass previous A here for warm-start (see below)
-        ridge=1e-6,       # start here; bump to 1e-5 or 1e-4 if still unstable
-        max_iter=60
+        x0=A0,  # pass previous A here for warm-start (see below)
+        ridge=float(ridge),
+        max_iter=int(max_iter),
+        ridge_sigma_x=ridge_sigma_x,
     )
 
     t = time.time() - t_0
-    print(f"solve time: {t:.4f} s", flush=True)
-    #print(f"{A.sum()=}")
+    print(f'solve time: {t:.4f} s', flush=True)
+    # print(f'{A.sum()=}')
+
+    # Diagnostics: are coefficients sitting on bounds?
+    # This helps distinguish a well-posed solve from an extrapolation/under-regularized solve.
+    bound_ratio = np.abs(A) / ub
+    bound_ratio = bound_ratio[np.isfinite(bound_ratio)]
+    if bound_ratio.size:
+        frac_near = float(np.mean(bound_ratio >= float(near_bound_ratio)))
+        n_near = int(np.sum(bound_ratio >= float(near_bound_ratio)))
+        max_ratio = float(np.max(bound_ratio))
+        p95_ratio = float(np.percentile(bound_ratio, 95.0))
+    else:
+        frac_near = 0.0
+        n_near = 0
+        max_ratio = float('nan')
+        p95_ratio = float('nan')
+
+    if diagnostics:
+        try:
+            nit = int(getattr(info, 'nit', -1))
+            success = bool(getattr(info, 'success', False))
+        except Exception:
+            nit = -1
+            success = False
+
+        print(
+            'LSQ diag: '
+            f'n_cols={P1.shape[1]} nit={nit} success={success} '
+            f'near_bound(thr={near_bound_ratio:.2f})={n_near}/{P1.shape[1]} '
+            f'frac={frac_near:.3f} max={max_ratio:.3f} p95={p95_ratio:.3f}',
+            flush=True,
+        )
 
     # reconstructed fields
     zc = P1 @ A
     z2 = P2 @ A
-    #print(f'{zc=} {z2=}')
+    # print(f'{zc=} {z2=}')
 
     # bookkeeping into params
     params = LSQWavePropParams()
     params.A = A
+    params.bound_near_ratio_threshold = float(near_bound_ratio)
+    params.bound_frac_ge_threshold = float(frac_near)
+    params.bound_ratio_max = float(max_ratio)
+    params.bound_ratio_p95 = float(p95_ratio)
+    params.solver_success = bool(getattr(info, 'success', False))
+    params.solver_nit = int(getattr(info, 'nit', 0) or 0)
+    params.solver_status = int(getattr(info, 'status', 0) or 0)
     params.Etheta = np.zeros_like(Ei.flatten(order='F')).T
-    params.Etheta[good] = (A[: (len(A) // 2)]**2. + A[(len(A) // 2):]**2.) / 2.0
+    params.Etheta[good] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
     params.Etheta = params.Etheta.reshape((len(k), len(theta)), order='F').T
     params.Etheta /= (
-        np.diff(f2[0, :] / (2. * np.pi), prepend=0.0)
+        np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
         * sps.mode(
             np.diff(np.degrees(thet2[:, 0])),
             axis=None,
@@ -412,20 +450,20 @@ def leastSquaresWavePropagation(z1, u1, v1, t1, x1, y1, t2, x2, y2, wavespec, A0
         ).mode.item()
     )
 
-    params.f = (f2[0, :] / (2. * np.pi)).flatten()
+    params.f = (f2[0, :] / (2.0 * np.pi)).flatten()
     params.theta = np.degrees(thet2[:, 0])
     params.theta += 180.0
     params.theta[params.theta > 360.0] -= 360.0
-    I = np.argsort(params.theta)
-    params.theta = params.theta[I].flatten()
-    params.Etheta = params.Etheta[I, :].T
+    sort_idx = np.argsort(params.theta)
+    params.theta = params.theta[sort_idx].flatten()
+    params.Etheta = params.Etheta[sort_idx, :].T
 
     params.kx = kx[good].flatten()
     params.ky = ky[good].flatten()
     params.omega = omega[good].flatten()
     params.use_vel = use_vel
 
-    #import sys; sys.exit(0)
+    # import sys; sys.exit(0)
 
     # return shapes consistent with MATLAB-style (column vectors)
     return (

@@ -1,4 +1,21 @@
-"""Utility functions for wave prediction and coordinate transformations.
+"""the_next_wave.utilities
+
+Utility functions for wave prediction and coordinate transformations.
+
+Frame conventions used throughout the Python port
+-----------------------------------------------
+
+Unless explicitly documented otherwise, this code assumes a local Cartesian frame where:
+
+- $x$ is East (meters)
+- $y$ is North (meters)
+- $z$ (heave / eta) is up-positive (meters)
+- $u$ is East (m/s)
+- $v$ is North (m/s)
+
+Important: `rotation_deg` rotates the *projected x/y coordinates* (clockwise-positive). The
+current pipeline does not automatically rotate (u,v) when `rotation_deg != 0`, so keep
+`rotation_deg = 0` unless you also rotate velocities consistently.
 
 Reusable functions extracted from example.py for use in the_next_wave_node.py and other modules.
 """
@@ -6,7 +23,7 @@ Reusable functions extracted from example.py for use in the_next_wave_node.py an
 import numpy as np
 import utm
 
-from .swift import SWIFTArray, WaveSpec
+from .swift import WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 
 
@@ -17,7 +34,7 @@ def as_1d(a) -> np.ndarray:
 def select_sbg_burst_struct(sbg_data, prefer_longest: bool = True):
     """Select a single raw SBG burst struct from a MATLAB-loaded `sbgData`."""
     try:
-        size = int(getattr(sbg_data, "size", 1))
+        size = int(getattr(sbg_data, 'size', 1))
     except Exception:
         size = 1
 
@@ -35,7 +52,7 @@ def select_sbg_burst_struct(sbg_data, prefer_longest: bool = True):
     for i in range(size):
         try:
             cand = sbg_data[i]
-            t = as_1d(getattr(getattr(cand, "ShipMotion"), "time_stamp"))
+            t = as_1d(getattr(getattr(cand, 'ShipMotion'), 'time_stamp'))
             n = int(t.size)
         except Exception:
             continue
@@ -53,7 +70,8 @@ def load_raw_sbg_arrays(
     start_index: int = 0,
     end_index: int | None = None,
 ):
-    """Extract aligned raw arrays from one SBG burst struct.
+    """
+    Extract aligned raw arrays from one SBG burst struct.
 
     Returns arrays in the raw SWIFT / SBG coordinate conventions.
 
@@ -66,24 +84,25 @@ def load_raw_sbg_arrays(
     vel_n : ndarray (N,)
     lat : ndarray (N,)
     lon : ndarray (N,)
+
     """
-    t_us = as_1d(getattr(getattr(sbg, "ShipMotion"), "time_stamp"))
-    heave = as_1d(getattr(getattr(sbg, "ShipMotion"), "heave"))
-    vel_e = as_1d(getattr(getattr(sbg, "GpsVel"), "vel_e"))
-    vel_n = as_1d(getattr(getattr(sbg, "GpsVel"), "vel_n"))
-    lat = as_1d(getattr(getattr(sbg, "GpsPos"), "lat"))
-    lon = as_1d(getattr(getattr(sbg, "GpsPos"), "long"))
+    t_us = as_1d(getattr(getattr(sbg, 'ShipMotion'), 'time_stamp'))
+    heave = as_1d(getattr(getattr(sbg, 'ShipMotion'), 'heave'))
+    vel_e = as_1d(getattr(getattr(sbg, 'GpsVel'), 'vel_e'))
+    vel_n = as_1d(getattr(getattr(sbg, 'GpsVel'), 'vel_n'))
+    lat = as_1d(getattr(getattr(sbg, 'GpsPos'), 'lat'))
+    lon = as_1d(getattr(getattr(sbg, 'GpsPos'), 'long'))
 
     n = int(min(t_us.size, heave.size, vel_e.size, vel_n.size, lat.size, lon.size))
     if n <= 0:
-        raise ValueError("No usable samples in SBG burst")
+        raise ValueError('No usable samples in SBG burst')
 
     start = max(0, int(start_index))
     stop = n if end_index is None else int(end_index)
     if stop < 0 or stop > n:
         stop = n
     if start >= stop:
-        raise ValueError(f"Invalid start/end: {start}..{stop} (n={n})")
+        raise ValueError(f'Invalid start/end: {start}..{stop} (n={n})')
 
     sl = slice(start, stop)
     return (
@@ -99,7 +118,7 @@ def load_raw_sbg_arrays(
 def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
     """
     Convert lat/lon coordinates to local x/y using UTM with rotation.
-    
+
     Parameters
     ----------
     lat, lon : array-like
@@ -107,12 +126,16 @@ def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
     lat0, lon0 : float
         Reference latitude and longitude in degrees
     rotation_deg : float
-        Rotation angle in degrees (clockwise positive)
-    
+        Rotation angle in degrees (clockwise positive). When `rotation_deg == 0`, the
+        returned x/y are East/North offsets in meters. When nonzero, the returned x/y are
+        in a rotated local frame (and are no longer East/North).
+
     Returns
     -------
     x, y : ndarray
-        Local Cartesian coordinates (east, north) in meters, rotated
+        Local Cartesian coordinates (meters). With `rotation_deg == 0`, x=East and y=North.
+        With `rotation_deg != 0`, x/y are rotated axes.
+
     """
     lat = np.asarray(lat, dtype=float)
     lon = np.asarray(lon, dtype=float)
@@ -141,7 +164,7 @@ def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
 def generic_coordinate_transform_inverse(x, y, lat0, lon0, rotation_deg):
     """
     Convert local x/y coordinates back to lat/lon (inverse of generic_coordinate_transform).
-    
+
     Parameters
     ----------
     x, y : array-like
@@ -150,61 +173,85 @@ def generic_coordinate_transform_inverse(x, y, lat0, lon0, rotation_deg):
         Reference latitude and longitude in degrees
     rotation_deg : float
         Rotation angle in degrees (clockwise positive)
-    
+
     Returns
     -------
     lat, lon : ndarray
         Latitude and longitude in degrees
+
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    
+
     # Undo rotation
     ang = np.deg2rad(rotation_deg)
     c = np.cos(ang)
     s = np.sin(ang)
-    
+
     dx = x * c - y * s
     dy = x * s + y * c
-    
+
     # Get reference UTM coordinates
     e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
-    
+
     e = dx + e0
     n = dy + n0
-    
+
     # Convert back to lat/lon
     lat = np.empty_like(x, dtype=float)
     lon = np.empty_like(x, dtype=float)
     for i in range(x.size):
-        # print(f'Converting back to lat/lon for point {i}: e={e.flat[i]}, n={n.flat[i]}, zone={zone_num}{zone_let}, ref={lat0},{lon0} rotation={rotation_deg} deg')
-        lat.flat[i], lon.flat[i] = utm.to_latlon(float(e.flat[i]), float(n.flat[i]), zone_num, zone_let)
-    
+        # Debug: print conversion inputs/outputs for this point if needed.
+        lat.flat[i], lon.flat[i] = utm.to_latlon(
+            float(e.flat[i]),
+            float(n.flat[i]),
+            zone_num,
+            zone_let,
+        )
+
     return lat, lon
 
 
-def build_wavespec_from_swifts(swifts, recip=True):
+def build_wavespec_from_swifts(
+    swifts,
+    recip: bool = False,
+    *,
+    mem_moment_cap: float | None = None,
+):
     """
     Build averaged directional spectrum from multiple SWIFT structures.
-    
+
     Parameters
     ----------
     swifts : list-like of SWIFTData
         SWIFT structures with computed wave spectra
-    recip : bool, optional
-        Whether to use reciprocal direction convention (default: True)
-    
+                recip : bool, optional
+                        Pass-through of MATLAB SWIFTdirectionalspectra.m `recip` behavior.
+
+                        Important: in the MATLAB implementation this flag is somewhat asymmetric:
+                        it flips the *Etheta/theta* axis when `recip=True`, while the
+                        moment-derived `dir` output is flipped when `recip=False`.
+
+                        In this Python port, callers should pick the value that matches their
+                        intended convention for `WaveSpec.theta` (compass degrees True, FROM vs TO).
+
     Returns
     -------
     ws : WaveSpec
         Averaged directional spectrum across all SWIFT buoys
+
     """
     Ethetas = []
     theta0 = None
     f0 = None
 
     for sw in swifts:
-        Etheta, theta, E, f, _, spread, spread2, _ = SWIFTdirectionalspectra(sw, plotflag=False, recip=recip)
+        Etheta, theta, E, f, _, spread, spread2, _ = SWIFTdirectionalspectra(
+            sw,
+            plotflag=False,
+            recip=recip,
+            mem_moment_cap=mem_moment_cap,
+        )
 
         Etheta = np.asarray(Etheta, dtype=float)
         f = np.asarray(f, dtype=float).ravel()
@@ -240,24 +287,25 @@ def build_wavespec_from_swifts(swifts, recip=True):
 def centroid_period_and_phase_speed(ws):
     """
     Compute centroid period and phase speed from wave spectrum.
-    
+
     Parameters
     ----------
     ws : WaveSpec
         Wave spectrum with Etheta (directional spectrum), f (frequencies)
-    
+
     Returns
     -------
     Te : float
         Centroid (energy-weighted) period [s]
     ce : float
         Phase speed [m/s]
+
     """
     Etheta = np.asarray(ws.Etheta)
     f = np.asarray(ws.f)
 
     if f.size == 0 or Etheta.size == 0:
-        return float("nan"), float("nan")
+        return float('nan'), float('nan')
 
     if Etheta.shape[0] != f.size and Etheta.shape[1] == f.size:
         Etheta = Etheta.T
@@ -266,20 +314,247 @@ def centroid_period_and_phase_speed(ws):
     denom = float(np.sum(Ef * f))
     numer = float(np.sum(Etheta))
     if not np.isfinite(denom) or denom <= 0.0 or not np.isfinite(numer):
-        return float("nan"), float("nan")
+        return float('nan'), float('nan')
 
     Te = numer / denom
     ce = 9.8 * Te / (2.0 * 3.14)
     return float(Te), float(ce)
 
 
-def load_raw_arrays_from_sbg(sbgs, *args):
+def _wrap_360(deg: float) -> float:
+    if not np.isfinite(deg):
+        return float('nan')
+    out = float(deg) % 360.0
+    if out < 0.0:
+        out += 360.0
+    return out
+
+
+def _deg_to_compass_16(deg: float) -> str:
+    if not np.isfinite(deg):
+        return 'nan'
+    labels = [
+        'N',
+        'NNE',
+        'NE',
+        'ENE',
+        'E',
+        'ESE',
+        'SE',
+        'SSE',
+        'S',
+        'SSW',
+        'SW',
+        'WSW',
+        'W',
+        'WNW',
+        'NW',
+        'NNW',
+    ]
+    idx = int(np.floor((_wrap_360(deg) + 11.25) / 22.5)) % 16
+    return labels[idx]
+
+
+def bulk_wave_params_from_1d_spectrum(
+    f_hz: np.ndarray,
+    E_m2_per_hz: np.ndarray,
+) -> dict:
+    """Compute a few standard bulk parameters from a 1D spectrum.
+
+    Assumes E(f) is in units of m^2/Hz and f is in Hz.
+    """
+    f = np.asarray(f_hz, dtype=float).ravel()
+    E = np.asarray(E_m2_per_hz, dtype=float).ravel()
+    ok = np.isfinite(f) & np.isfinite(E) & (f > 0.0) & (E >= 0.0)
+    if np.count_nonzero(ok) < 2:
+        return {
+            'Hs_m': float('nan'),
+            'Tp_s': float('nan'),
+            'fp_hz': float('nan'),
+            'Tm01_s': float('nan'),
+            'Tm02_s': float('nan'),
+            'm0': float('nan'),
+        }
+
+    f = f[ok]
+    E = E[ok]
+    order = np.argsort(f)
+    f = f[order]
+    E = E[order]
+
+    # NumPy 2.x: np.trapz was removed; use np.trapezoid instead.
+    m0 = float(np.trapezoid(E, f))
+    m1 = float(np.trapezoid(f * E, f))
+    m2 = float(np.trapezoid((f**2) * E, f))
+    Hs = 4.0 * np.sqrt(m0) if np.isfinite(m0) and m0 > 0.0 else float('nan')
+
+    i_peak = int(np.nanargmax(E)) if np.isfinite(E).any() else 0
+    fp = float(f[i_peak]) if f.size else float('nan')
+    Tp = 1.0 / fp if np.isfinite(fp) and fp > 0.0 else float('nan')
+
+    Tm01 = (m0 / m1) if np.isfinite(m0) and np.isfinite(m1) and m1 > 0.0 else float('nan')
+    Tm02 = (
+        np.sqrt(m0 / m2)
+        if np.isfinite(m0) and np.isfinite(m2) and m0 > 0.0 and m2 > 0.0
+        else float('nan')
+    )
+
+    return {
+        'Hs_m': float(Hs),
+        'Tp_s': float(Tp),
+        'fp_hz': float(fp),
+        'Tm01_s': float(Tm01),
+        'Tm02_s': float(Tm02),
+        'm0': float(m0),
+    }
+
+
+def bulk_dir_params_from_Etheta(
+    f_hz: np.ndarray,
+    theta_deg: np.ndarray,
+    Etheta: np.ndarray,
+) -> dict:
+    """Compute peak/mean direction and a simple spread estimate from Etheta.
+
+    Uses circular moments of the energy-weighted directional distribution.
+    Theta is assumed in degrees in *nautical/compass convention* (0°=North, 90°=East)
+    as produced by SWIFTdirectionalspectra.
+    """
+    f = np.asarray(f_hz, dtype=float).ravel()
+    theta = np.asarray(theta_deg, dtype=float).ravel()
+    S = np.asarray(Etheta, dtype=float)
+
+    if f.size == 0 or theta.size == 0 or S.size == 0:
+        return {'Dp_deg': float('nan'), 'Dm_deg': float('nan'), 'spreadp_deg': float('nan')}
+
+    # Expected SWIFTdirectionalspectra shape: (nfreq, ntheta)
+    if S.shape == (theta.size, f.size):
+        S = S.T
+    if S.shape[0] != f.size or S.shape[1] != theta.size:
+        return {'Dp_deg': float('nan'), 'Dm_deg': float('nan'), 'spreadp_deg': float('nan')}
+
+    dtheta_deg = float(np.nanmedian(np.diff(np.sort(theta)))) if theta.size > 1 else 1.0
+    # MEM_directionalestimator normalizes using radians (see MATLAB: tot=sum(S)*dtheta*dr).
+    # Therefore Etheta is per-radian, and integrations over theta must use dtheta_rad.
+    dtheta = float(dtheta_deg * (np.pi / 180.0))
+    theta_rad = np.deg2rad(theta)
+
+    # Nautical/compass directions are measured clockwise from North.
+    # Represent each direction as an EN unit vector:
+    #   east  = sin(theta)
+    #   north = cos(theta)
+    east = np.sin(theta_rad)
+    north = np.cos(theta_rad)
+
+    # 1D energy spectrum (m^2/Hz): integrate directional density over theta
+    E = np.sum(S * dtheta, axis=1)
+    if not np.isfinite(E).any() or float(np.nansum(E)) <= 0.0:
+        return {'Dp_deg': float('nan'), 'Dm_deg': float('nan'), 'spreadp_deg': float('nan')}
+
+    i_peak = int(np.nanargmax(E))
+
+    # Peak-direction moments
+    w_peak = S[i_peak, :] * dtheta
+    denom_peak = float(np.nansum(w_peak))
+    if not np.isfinite(denom_peak) or denom_peak <= 0.0:
+        Dp = float('nan')
+        spreadp = float('nan')
+    else:
+        mean_e = float(np.nansum(w_peak * east) / denom_peak)
+        mean_n = float(np.nansum(w_peak * north) / denom_peak)
+        # Heading in compass degrees: atan2(east, north)
+        Dp = _wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
+        R = float(np.hypot(mean_e, mean_n))
+        spreadp = float(np.rad2deg(np.sqrt(max(0.0, 2.0 * (1.0 - R)))))
+
+    # Mean direction across all frequencies, energy-weighted
+    df = np.diff(f)
+    df = np.concatenate([df, df[-1:]]) if df.size else np.array([1.0])
+    df = df.reshape((-1, 1))
+    w_all = S * dtheta * df
+    denom_all = float(np.nansum(w_all))
+    if not np.isfinite(denom_all) or denom_all <= 0.0:
+        Dm = float('nan')
+    else:
+        mean_e = float(np.nansum(w_all * east.reshape((1, -1))) / denom_all)
+        mean_n = float(np.nansum(w_all * north.reshape((1, -1))) / denom_all)
+        Dm = _wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
+
+    return {'Dp_deg': float(Dp), 'Dm_deg': float(Dm), 'spreadp_deg': float(spreadp)}
+
+
+def bulk_wave_params_from_wavespec(ws) -> dict:
+    """Compute bulk parameters from a WaveSpec (directional spectrum)."""
+    f = np.asarray(getattr(ws, 'f', np.array([])), dtype=float).ravel()
+    theta = np.asarray(getattr(ws, 'theta', np.array([])), dtype=float).ravel()
+    S = np.asarray(getattr(ws, 'Etheta', np.array([[]])), dtype=float)
+    if f.size == 0 or theta.size == 0 or S.size == 0:
+        return {
+            **bulk_wave_params_from_1d_spectrum(np.array([]), np.array([])),
+            'Dp_deg': float('nan'),
+            'Dm_deg': float('nan'),
+            'spreadp_deg': float('nan'),
+        }
+
+    if S.shape == (theta.size, f.size):
+        S = S.T
+    dtheta_deg = float(np.nanmedian(np.diff(np.sort(theta)))) if theta.size > 1 else 1.0
+    dtheta = float(dtheta_deg * (np.pi / 180.0))
+    E = np.sum(S * dtheta, axis=1)
+
+    out = dict(bulk_wave_params_from_1d_spectrum(f, E))
+    out.update(bulk_dir_params_from_Etheta(f, theta, S))
+    return out
+
+
+def format_bulk_wave_params(params: dict, label: str = '') -> str:
+    prefix = f'{label}: ' if label else ''
+
+    Hs = params.get('Hs_m', float('nan'))
+    Tp = params.get('Tp_s', float('nan'))
+    Tm01 = params.get('Tm01_s', float('nan'))
+    Tm02 = params.get('Tm02_s', float('nan'))
+    Dp = params.get('Dp_deg', float('nan'))
+    Dm = params.get('Dm_deg', float('nan'))
+    spreadp = params.get('spreadp_deg', float('nan'))
+
+    parts = [
+        f'Hs={Hs:.2f} m' if np.isfinite(Hs) else 'Hs=nan',
+        f'Tp={Tp:.2f} s' if np.isfinite(Tp) else 'Tp=nan',
+        f'Tm01={Tm01:.2f} s' if np.isfinite(Tm01) else 'Tm01=nan',
+        f'Tm02={Tm02:.2f} s' if np.isfinite(Tm02) else 'Tm02=nan',
+    ]
+
+    if np.isfinite(Dp):
+        parts.append(f'Dp={Dp:.1f}° ({_deg_to_compass_16(Dp)})')
+    else:
+        parts.append('Dp=nan')
+
+    if np.isfinite(Dm):
+        parts.append(f'Dm={Dm:.1f}° ({_deg_to_compass_16(Dm)})')
+    else:
+        parts.append('Dm=nan')
+
+    if np.isfinite(spreadp):
+        parts.append(f'spread@peak={spreadp:.1f}°')
+
+    return prefix + ', '.join(parts)
+
+
+def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
     """
     Extract and stack raw SBG data from multiple buoys.
-    
-    Converts lat/lon to local x/y coordinates, stacks data from all buoys,
-    negates heave (for upside-down SBG mount), and computes sampling rate.
-    
+
+        Converts lat/lon to local x/y coordinates, stacks data from all buoys,
+        optionally negates heave (for upside-down SBG mount), and computes sampling rate.
+
+        Notes on frames
+        ---------------
+        - Input velocities are taken as East/North from SBG (`vel_e`, `vel_n`).
+        - Positions are projected to local x/y using `generic_coordinate_transform`.
+        - If `rotation_deg != 0`, x/y are rotated but (u,v) are still East/North. To avoid
+            mixing frames, prefer `rotation_deg = 0` unless you also rotate (u,v) consistently.
+
     Supports both call signatures (for compatibility with `example.py`):
 
     1) load_raw_arrays_from_sbg(sbgs, latorigin, lonorigin, rotation)
@@ -297,15 +572,22 @@ def load_raw_arrays_from_sbg(sbgs, *args):
         Reference latitude and longitude in degrees
     rotation : float
         Rotation angle in degrees for coordinate transformation
-    
+
     Returns
     -------
     zin, uin, vin : ndarray (N, nbuoys)
-        Stacked heave and velocity arrays (z negated for upside-down mount)
+        Stacked heave and velocity arrays. `uin/vin` are East/North (m/s).
+        `zin` is up-positive (meters) when `flip_z_sign` is configured correctly.
     tin, xin, yin : ndarray (N, nbuoys)
         Stacked time and position arrays
     fs : float
         Sampling rate [Hz]
+
+    flip_z_sign : bool, optional
+        If True (default), negate the stacked heave signal to correct for the
+        real SWIFT SBG being mounted upside-down. Set False when the incoming
+        z/heave is already in the desired sign convention (e.g., gz sim).
+
     """
     # Parse args for backward/forward compatibility.
     if len(args) == 3:
@@ -316,8 +598,8 @@ def load_raw_arrays_from_sbg(sbgs, *args):
         skipwarmup, burstend, latorigin, lonorigin, rotation = args
     else:
         raise TypeError(
-            "load_raw_arrays_from_sbg expects (sbgs, lat0, lon0, rotation) or "
-            "(sbgs, skipwarmup, burstend, lat0, lon0, rotation)"
+            'load_raw_arrays_from_sbg expects (sbgs, lat0, lon0, rotation) or '
+            '(sbgs, skipwarmup, burstend, lat0, lon0, rotation)'
         )
 
     zin = []
@@ -395,25 +677,25 @@ def load_raw_arrays_from_sbg(sbgs, *args):
         if n_local2 != y.size:
             y = y[:n_local2]
 
-        per_buoy.append({"t": ztime, "z": z, "u": u, "v": v, "x": x, "y": y})
+        per_buoy.append({'t': ztime, 'z': z, 'u': u, 'v': v, 'x': x, 'y': y})
 
     if not per_buoy:
-        raise ValueError("No usable samples in SBG inputs")
+        raise ValueError('No usable samples in SBG inputs')
 
     # Choose a reference time grid. In the main pipeline sbgs are ordered (swift22..)
     # so using the first buoy provides stable behavior across runs.
-    t_ref = np.asarray(per_buoy[0]["t"], dtype=float).reshape((-1,))
+    t_ref = np.asarray(per_buoy[0]['t'], dtype=float).reshape((-1,))
     if t_ref.size < 2:
-        raise ValueError("Not enough reference samples for alignment")
+        raise ValueError('Not enough reference samples for alignment')
 
     # Estimate a reasonable matching tolerance from the reference sampling.
     dt_ref = np.diff(t_ref)
     dt_ref = dt_ref[np.isfinite(dt_ref) & (dt_ref > 0.0)]
     if dt_ref.size == 0:
-        raise ValueError("Invalid reference timestamps for alignment")
+        raise ValueError('Invalid reference timestamps for alignment')
     period_ref = float(np.nanmedian(dt_ref))
     if not np.isfinite(period_ref) or period_ref <= 0.0:
-        raise ValueError("Invalid reference sampling period")
+        raise ValueError('Invalid reference sampling period')
     # Nearest-neighbor without interpolation: accept matches within ~half a sample.
     tol = 0.55 * period_ref
 
@@ -422,13 +704,13 @@ def load_raw_arrays_from_sbg(sbgs, *args):
     indices_by_buoy = []
     valid = np.ones((t_ref.size,), dtype=bool)
     for b in per_buoy:
-        t = np.asarray(b["t"], dtype=float).reshape((-1,))
+        t = np.asarray(b['t'], dtype=float).reshape((-1,))
         if t.size == 0:
             valid[:] = False
             indices_by_buoy.append(np.zeros_like(t_ref, dtype=int))
             continue
 
-        j = np.searchsorted(t, t_ref, side="left")
+        j = np.searchsorted(t, t_ref, side='left')
         j0 = np.clip(j - 1, 0, t.size - 1)
         j1 = np.clip(j, 0, t.size - 1)
 
@@ -446,16 +728,16 @@ def load_raw_arrays_from_sbg(sbgs, *args):
 
     t_common = t_ref[valid]
     if t_common.size < 2:
-        raise ValueError("Not enough aligned samples across buoys")
+        raise ValueError('Not enough aligned samples across buoys')
 
     # Build aligned per-buoy vectors at the matched indices; assign common time grid.
     for b, idx in zip(per_buoy, indices_by_buoy, strict=True):
         ii = np.asarray(idx, dtype=int)[valid]
-        zin.append(np.asarray(b["z"], dtype=float)[ii])
-        uin.append(np.asarray(b["u"], dtype=float)[ii])
-        vin.append(np.asarray(b["v"], dtype=float)[ii])
-        xin.append(np.asarray(b["x"], dtype=float)[ii])
-        yin.append(np.asarray(b["y"], dtype=float)[ii])
+        zin.append(np.asarray(b['z'], dtype=float)[ii])
+        uin.append(np.asarray(b['u'], dtype=float)[ii])
+        vin.append(np.asarray(b['v'], dtype=float)[ii])
+        xin.append(np.asarray(b['x'], dtype=float)[ii])
+        yin.append(np.asarray(b['y'], dtype=float)[ii])
         tin.append(np.asarray(t_common, dtype=float))
 
     zin = np.column_stack(zin)
@@ -465,7 +747,8 @@ def load_raw_arrays_from_sbg(sbgs, *args):
     xin = np.column_stack(xin)
     yin = np.column_stack(yin)
 
-    zin = -zin  # SBG mounted upside-down on SWIFT
+    if bool(flip_z_sign):
+        zin = -zin  # Real SBG mounted upside-down on SWIFT
 
     fs = 1.0 / float(np.nanmean(np.diff(tin, axis=0)))
     return zin, uin, vin, tin, xin, yin, fs
