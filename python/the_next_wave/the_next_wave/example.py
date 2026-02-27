@@ -12,10 +12,10 @@ from .leastSquaresWavePropagation import leastSquaresWavePropagation
 from .swift import Prediction, SWIFTArray, WaveSpec
 from .utilities import (
     build_wavespec_from_swifts,
-    centroid_period_and_phase_speed,
     bulk_wave_params_from_wavespec,
-    load_raw_arrays_from_sbg,
+    centroid_period_and_phase_speed,
     format_bulk_wave_params,
+    load_raw_arrays_from_sbg,
 )
 
 
@@ -234,7 +234,11 @@ def main():
             ax_v_pr = fig.add_subplot(gs[5, 1], sharex=ax_z_pr)
 
             # Map: plot buoy tracks + a representative per-buoy position marker.
-            colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0', 'C1', 'C2', 'C3'])
+            colors = (
+                plt.rcParams['axes.prop_cycle']
+                .by_key()
+                .get('color', ['C0', 'C1', 'C2', 'C3'])
+            )
             xw = np.asarray(xin[inputwindow, :], dtype=float)
             yw = np.asarray(yin[inputwindow, :], dtype=float)
 
@@ -246,7 +250,14 @@ def main():
                 ok = np.isfinite(xj) & np.isfinite(yj)
                 if not np.any(ok):
                     continue
-                ax_map.plot(xj[ok], yj[ok], '.', color=colors[j % len(colors)], alpha=0.25, markersize=2)
+                ax_map.plot(
+                    xj[ok],
+                    yj[ok],
+                    '.',
+                    color=colors[j % len(colors)],
+                    alpha=0.25,
+                    markersize=2,
+                )
                 x_med = float(np.nanmedian(xj[ok]))
                 y_med = float(np.nanmedian(yj[ok]))
                 buoy_x.append(x_med)
@@ -265,8 +276,18 @@ def main():
             ax_map.plot([float(xtarget)], [float(ytarget)], 'ko', markersize=6, label='target')
 
             # Auto-scale around all finite buoy points and the target.
-            x_all = np.concatenate([np.asarray(buoy_x, dtype=float), np.asarray([xtarget], dtype=float)])
-            y_all = np.concatenate([np.asarray(buoy_y, dtype=float), np.asarray([ytarget], dtype=float)])
+            x_all = np.concatenate(
+                [
+                    np.asarray(buoy_x, dtype=float),
+                    np.asarray([xtarget], dtype=float),
+                ]
+            )
+            y_all = np.concatenate(
+                [
+                    np.asarray(buoy_y, dtype=float),
+                    np.asarray([ytarget], dtype=float),
+                ]
+            )
             ok_all = np.isfinite(x_all) & np.isfinite(y_all)
             if np.any(ok_all):
                 xmin = float(np.min(x_all[ok_all]))
@@ -353,12 +374,12 @@ def main():
                         ha='left',
                         va='top',
                         fontsize=9,
-                        bbox=dict(
-                            boxstyle='round,pad=0.2',
-                            facecolor='white',
-                            alpha=0.7,
-                            edgecolor='none',
-                        ),
+                        bbox={
+                            'boxstyle': 'round,pad=0.2',
+                            'facecolor': 'white',
+                            'alpha': 0.7,
+                            'edgecolor': 'none',
+                        },
                     )
             except Exception:
                 # If plotting backends or patches aren't available, keep the example running.

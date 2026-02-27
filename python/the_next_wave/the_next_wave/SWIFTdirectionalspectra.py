@@ -35,6 +35,16 @@ def SWIFTdirectionalspectra(
     nautical convention compass direction FROM which waves are coming also
     reports the dominant direction at each frequency and the spread.
 
+        Notes on direction conventions
+        ------------------------------
+        - Angles are compass degrees True (0°=North, 90°=East).
+        - "FROM" means the direction waves are coming from (the common oceanographic
+            reporting convention). A propagation direction is TO = FROM + 180.
+        - The legacy MATLAB implementation's `recip` flag is asymmetric: it flips
+            the Etheta/theta axis when `recip=True`, while the moment-derived `dir`
+            output is flipped when `recip=False`. This Python port preserves that
+            behavior for compatibility.
+
     This is intended to be used after post-processing wave data with
     'reprocess_IMU.m' which uses 'XYZwaves.m' to get coefficients
 

@@ -1,4 +1,5 @@
-"""the_next_wave.utilities
+"""
+Utilities for the_next_wave.
 
 Utility functions for wave prediction and coordinate transformations.
 
@@ -13,9 +14,9 @@ Unless explicitly documented otherwise, this code assumes a local Cartesian fram
 - $u$ is East (m/s)
 - $v$ is North (m/s)
 
-Important: `rotation_deg` rotates the *projected x/y coordinates* (clockwise-positive). The
-current pipeline does not automatically rotate (u,v) when `rotation_deg != 0`, so keep
-`rotation_deg = 0` unless you also rotate velocities consistently.
+Important: `rotation_deg` rotates the *projected x/y coordinates* (clockwise-positive).
+The current pipeline does not automatically rotate (u,v) when `rotation_deg != 0`, so
+keep `rotation_deg = 0` unless you also rotate velocities consistently.
 
 Reusable functions extracted from example.py for use in the_next_wave_node.py and other modules.
 """
@@ -225,15 +226,21 @@ def build_wavespec_from_swifts(
     ----------
     swifts : list-like of SWIFTData
         SWIFT structures with computed wave spectra
-                recip : bool, optional
-                        Pass-through of MATLAB SWIFTdirectionalspectra.m `recip` behavior.
+    recip : bool, optional
+        Pass-through of MATLAB `SWIFTdirectionalspectra(..., recip=...)` behavior.
 
-                        Important: in the MATLAB implementation this flag is somewhat asymmetric:
-                        it flips the *Etheta/theta* axis when `recip=True`, while the
-                        moment-derived `dir` output is flipped when `recip=False`.
+    mem_moment_cap : float or None, optional
+        Optional cap applied to MEM directional moments to reduce numerical
+        instability in low-energy bands.
 
-                        In this Python port, callers should pick the value that matches their
-                        intended convention for `WaveSpec.theta` (compass degrees True, FROM vs TO).
+        Important: in the MATLAB implementation this flag is asymmetric:
+        - It flips the *Etheta/theta* axis when `recip=True`.
+        - It flips the moment-derived `dir` output when `recip=False`.
+
+        In this repo, `WaveSpec.theta` is treated as compass degrees True,
+        direction waves are coming FROM (and any propagation arrow uses
+        TO = FROM + 180, wrapped to 0–360). Callers should choose `recip` so
+        that `WaveSpec.theta` matches that convention.
 
     Returns
     -------
@@ -359,7 +366,8 @@ def bulk_wave_params_from_1d_spectrum(
     f_hz: np.ndarray,
     E_m2_per_hz: np.ndarray,
 ) -> dict:
-    """Compute a few standard bulk parameters from a 1D spectrum.
+    """
+    Compute a few standard bulk parameters from a 1D spectrum.
 
     Assumes E(f) is in units of m^2/Hz and f is in Hz.
     """
@@ -414,11 +422,12 @@ def bulk_dir_params_from_Etheta(
     theta_deg: np.ndarray,
     Etheta: np.ndarray,
 ) -> dict:
-    """Compute peak/mean direction and a simple spread estimate from Etheta.
+    """
+    Compute peak/mean direction and a simple spread estimate from Etheta.
 
     Uses circular moments of the energy-weighted directional distribution.
-    Theta is assumed in degrees in *nautical/compass convention* (0°=North, 90°=East)
-    as produced by SWIFTdirectionalspectra.
+    Theta is assumed in *compass degrees True* (0°=North, 90°=East), and represents
+    the direction waves are coming FROM (as produced by SWIFTdirectionalspectra).
     """
     f = np.asarray(f_hz, dtype=float).ravel()
     theta = np.asarray(theta_deg, dtype=float).ravel()
@@ -545,15 +554,15 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
     """
     Extract and stack raw SBG data from multiple buoys.
 
-        Converts lat/lon to local x/y coordinates, stacks data from all buoys,
-        optionally negates heave (for upside-down SBG mount), and computes sampling rate.
+    Converts lat/lon to local x/y coordinates, stacks data from all buoys,
+    optionally negates heave (for upside-down SBG mount), and computes sampling rate.
 
-        Notes on frames
-        ---------------
-        - Input velocities are taken as East/North from SBG (`vel_e`, `vel_n`).
-        - Positions are projected to local x/y using `generic_coordinate_transform`.
-        - If `rotation_deg != 0`, x/y are rotated but (u,v) are still East/North. To avoid
-            mixing frames, prefer `rotation_deg = 0` unless you also rotate (u,v) consistently.
+    Notes on frames
+    ---------------
+    - Input velocities are taken as East/North from SBG (`vel_e`, `vel_n`).
+    - Positions are projected to local x/y using `generic_coordinate_transform`.
+    - If `rotation_deg != 0`, x/y are rotated but (u,v) are still East/North. To avoid
+      mixing frames, prefer `rotation_deg = 0` unless you also rotate (u,v) consistently.
 
     Supports both call signatures (for compatibility with `example.py`):
 
@@ -572,6 +581,10 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         Reference latitude and longitude in degrees
     rotation : float
         Rotation angle in degrees for coordinate transformation
+    flip_z_sign : bool, optional
+        If True (default), negate the stacked heave signal to correct for the
+        real SWIFT SBG being mounted upside-down. Set False when the incoming
+        z/heave is already in the desired sign convention (e.g., gz sim).
 
     Returns
     -------
@@ -582,11 +595,6 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         Stacked time and position arrays
     fs : float
         Sampling rate [Hz]
-
-    flip_z_sign : bool, optional
-        If True (default), negate the stacked heave signal to correct for the
-        real SWIFT SBG being mounted upside-down. Set False when the incoming
-        z/heave is already in the desired sign convention (e.g., gz sim).
 
     """
     # Parse args for backward/forward compatibility.

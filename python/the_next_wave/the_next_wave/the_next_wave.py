@@ -436,7 +436,8 @@ class TheNextWave:
         return results
 
     def stack_measurement_data(self, cleaned_sbg: SWIFTArray) -> tuple[np.ndarray, ...]:
-        """Stack buoy measurement windows into solver-ready matrices.
+        """
+        Stack buoy measurement windows into solver-ready matrices.
 
         Frame conventions:
         - `xin/yin` are local Cartesian positions in meters (see `rotation_deg`).

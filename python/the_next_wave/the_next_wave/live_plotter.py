@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -297,7 +297,12 @@ class LivePlotter:
                 ha='left',
                 va='top',
                 fontsize=9,
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='none'),
+                bbox={
+                    'boxstyle': 'round,pad=0.2',
+                    'facecolor': 'white',
+                    'alpha': 0.7,
+                    'edgecolor': 'none',
+                },
             )
         ax.set_xlabel('x [m]')
         ax.set_ylabel('y [m]')

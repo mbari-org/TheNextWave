@@ -38,7 +38,7 @@ def sbg_waves(
     # --- fixed parameters (from MATLAB) ---
     wsecs = 256  # window length in seconds
     merge = 3  # number of neighboring freq bands to merge
-    recip = True  # flip wave directions (FROM vs TOWARDS)
+    recip = True  # MATLAB convention: return Dp as compass degrees True, direction waves come FROM
     RC = 3.5  # RC filter constant
     fmin = 0.05
     fmax = 1.0

@@ -370,8 +370,12 @@ class TheNextWaveNode(Interface):
             if wec_actual_hist:
                 for p in wec_actual_hist:
                     t_s = float(p[0])
-                    if np.isfinite(t_s) and (not np.isfinite(window_end_time) or t_s <= window_end_time):
-                        wec_hist_filtered.append((float(p[0]), float(p[1]), float(p[2]), float(p[3])))
+                    if np.isfinite(t_s) and (
+                        not np.isfinite(window_end_time) or t_s <= window_end_time
+                    ):
+                        wec_hist_filtered.append(
+                            (float(p[0]), float(p[1]), float(p[2]), float(p[3]))
+                        )
 
             wec_at_window_end = None
             if wec_hist_filtered:

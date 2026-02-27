@@ -9,6 +9,7 @@ The Python port expects positions and velocity components to share a consistent 
 
 - **Local horizontal frame**: $x$ is East (meters), $y$ is North (meters). $z$ is up-positive (meters).
 - **Horizontal velocities**: $u$ is East (m/s), $v$ is North (m/s).
+- **Wave directions**: compass degrees True (0°=North, 90°=East). Bulk directions such as $D_p$ are the direction waves are coming **FROM**. Propagation direction is **TO** = FROM + 180 (wrapped to 0–360).
 - **Simulation (`mbari_wec_gz`)**: incident-wave outputs are already in world ENU with $u/v$ = East/North; do not apply SWIFT-specific sign flips to sim data.
 - **Rotation (`rotation_deg`)**: applied to the lat/lon → x/y projection (clockwise-positive). If you set `rotation_deg != 0`, x/y are rotated but u/v are not automatically rotated in the pipeline; keep `rotation_deg: 0.0` unless you rotate u/v consistently.
 
@@ -63,12 +64,8 @@ If you would like to generate a video instead of plotting, you can add the `--mo
 argument.
 
 
-## TODO
+## Notes / TODO
 
-Develop real-time prediction processing pipeline as ROS 2 node:
-1. a. portAndDecodeFromEthernetBridge.py --> sbgMessageParse.py --> raw SBG data
-   b. read the sim SBG data (u,v,heave) from mbari_wec sim ROS 2 messages
-2. collect a window of raw SBG data
-3. pass raw SBG window to reprocess_SBG.py (still needs to be ported from matlab) --> SBGwaves.py (needs port from matlab) --> wavespectra --> SWIFTdirectionalspectra.py --> bulk wave params
-4. pass raw SBG window and bulk wave params to leastSquaresWavePropagation.py and associated preprocessing for a prediction window.
+- The real-time ROS 2 pipeline (windowing → wavespec → least-squares prediction) is implemented in this repo.
+- Known limitation: if you use `rotation_deg != 0`, you must rotate $u/v$ consistently upstream; the pipeline does not currently rotate $u/v$ automatically.
 

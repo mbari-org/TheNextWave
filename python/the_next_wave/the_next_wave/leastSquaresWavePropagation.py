@@ -169,9 +169,21 @@ def leastSquaresWavePropagation(
         Must have attributes:
           - Etheta : 2D array, directional wave spectrum (freq × direction)
           - f      : 1D array, frequencies [Hz]
-          - theta  : 1D array, directions [deg, nautical convention]
+                    - theta  : 1D array, directions [deg True, FROM]
     A0 : array-like, optional
         Warm-start amplitudes from the previous solve.
+    ridge : float, optional
+        Ridge (L2) regularization strength.
+    max_iter : int, optional
+        Maximum L-BFGS-B iterations per solve.
+    use_spectrum_weighted_ridge : bool, optional
+        If True, scale ridge penalty per component using spectrum-derived bounds.
+    spectrum_ridge_floor : float, optional
+        Minimum per-component prior scale used when spectrum-weighted ridge is enabled.
+    diagnostics : bool, optional
+        If True, print solver diagnostics (iteration count, status, bound ratios).
+    near_bound_ratio : float, optional
+        Threshold (0–1) for counting coefficients as "near" the box bounds.
 
     """
     if len(u1) > 0 and len(v1) > 0:
@@ -179,7 +191,9 @@ def leastSquaresWavePropagation(
     else:
         use_vel = False
 
-    # convert wave spectrum to Cartesian coordinates (direction waves move TOWARDS)
+    # Convert wave spectrum to Cartesian coordinates.
+    # Input convention: `wavespec.theta` is compass degrees True, direction waves come FROM.
+    # Internally, this solver shifts by 180° to work in the propagation (TO) direction.
     if wavespec.Etheta.shape[0] == len(wavespec.theta):
         wavespec.Etheta = wavespec.Etheta.T
 
@@ -411,13 +425,25 @@ def leastSquaresWavePropagation(
         try:
             nit = int(getattr(info, 'nit', -1))
             success = bool(getattr(info, 'success', False))
+            status = int(getattr(info, 'status', -1))
+            message = str(getattr(info, 'message', '') or '')
         except Exception:
             nit = -1
             success = False
+            status = -1
+            message = ''
+
+        message = message.replace('\n', ' ').strip()
+        if len(message) > 120:
+            message = message[:117] + '...'
+
+        hit_maxiter = (nit >= 0) and (int(max_iter) > 0) and (nit >= int(max_iter))
 
         print(
             'LSQ diag: '
-            f'n_cols={P1.shape[1]} nit={nit} success={success} '
+            f'n_cols={P1.shape[1]} nit={nit}/{int(max_iter)} '
+            f'hit_maxiter={hit_maxiter} status={status} success={success} '
+            f'msg="{message}" '
             f'near_bound(thr={near_bound_ratio:.2f})={n_near}/{P1.shape[1]} '
             f'frac={frac_near:.3f} max={max_ratio:.3f} p95={p95_ratio:.3f}',
             flush=True,

@@ -48,6 +48,15 @@ def MEM_directionalestimator(a1, a2, b1, b2, en, convert):
     %
     % calculate directional energy spectrum based on Maximum Entropy Method (MEM)
     % of Lygre & Krogstad, JPO V16 1986.
+
+    Notes (repo convention)
+    ----------------------
+    This is a direct Python port of the legacy MATLAB implementation.
+
+    In this repo, `SWIFTdirectionalspectra()` calls `MEM_directionalestimator(..., convert=0)`
+    and then applies the rotation / compass "FROM" convention outside this function.
+    Published directional outputs (e.g., `WaveSpec.theta`, `Dp`) are compass degrees True
+    (0°=North, 90°=East), direction waves are coming FROM.
     """
     # switch to Krogstad notation
     d1 = np.asarray(a1)

@@ -503,9 +503,9 @@ class LSQWavePropParams:
 
     Shapes:
         - A: (N,), wave amplitude solution vector (concatenated cosine/sine components)
-        - Etheta: (Nθ, Nf), directional spectrum reconstructed from solution
+        - Etheta: (Nf, Nθ), directional spectrum reconstructed from solution
         - f: (Nf,), frequency grid [Hz]
-        - theta: (Nθ,), direction grid [degrees]
+        - theta: (Nθ,), direction grid [deg True, FROM] (0°=North, 90°=East)
         - kx, ky: (N,), Cartesian wavenumber components [rad/m]
         - omega: (N,), angular frequencies [rad/s]
 
@@ -540,8 +540,11 @@ class LSQWavePropParams:
     theta: npt.NDArray[np.float64] = field(
         default_factory=empty_float64,
         metadata={
-            'units': 'deg (nautical)',
-            'description': 'Directional components (25 elements).'
+            'units': 'deg True (FROM)',
+            'description': (
+                'Direction grid (compass degrees True): '
+                'direction waves are coming FROM.'
+            )
         },
     )
     kx: npt.NDArray[np.float64] = field(
