@@ -14,6 +14,7 @@ All ROS 2 concerns (publishers, messages, time stamps) should live in the node.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,16 @@ class TheNextWaveConfig:
     # rotation_deg is nonzero. To avoid mixing frames, prefer rotation_deg == 0
     # unless you also rotate (u,v) consistently upstream.
     rotation_deg: float = 0.0
+
+    # Projection origin convention.
+    #
+    # If False (default), the local x/y projection origin (lat_origin/lon_origin)
+    # is taken from the first available SWIFT buoy in the window (typically swift22).
+    #
+    # If True, the origin is set to the provided target location (wec_lat/wec_lon)
+    # for each `process()` call, so the target is at (x_target, y_target)=(0,0)
+    # and all buoy x/y are expressed relative to the target.
+    origin_at_target: bool = False
     # Real SWIFT SBG heave is mounted upside-down; negate to get "up-positive".
     # For gz sim (or other sources that already publish z in the desired sign),
     # set this False.
@@ -74,6 +85,10 @@ class TheNextWaveConfig:
     mem_moment_cap_enable: bool = False
     mem_moment_cap: float = 0.999
 
+    # Optional lightweight profiling (stage timings via perf_counter).
+    profiling_enable: bool = False
+    profiling_log_every_n: int = 20
+
 
 class TheNextWave:
     """Algorithmic wave prediction core (no ROS dependencies)."""
@@ -87,6 +102,7 @@ class TheNextWave:
         self.lon_origin: float | None = None
         self.last_wavespec: WaveSpec | None = None
         self.last_wavespec_time_s: float | None = None
+        self._profiling_iter: int = 0
 
     def wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
         if ws is None:
@@ -133,7 +149,14 @@ class TheNextWave:
         """
         results: dict[str, Any] = {'wave_stats': {}}
 
+        prof: dict[str, float] = {}
+        prof_enabled = bool(getattr(self.config, 'profiling_enable', False))
+        t_prof0 = time.perf_counter() if prof_enabled else 0.0
+
+        t0 = time.perf_counter() if prof_enabled else 0.0
         cleaned_sbg, swift_structs = reprocess_swift_array(swifts, fs=self.config.expected_fs)
+        if prof_enabled:
+            prof['reprocess_swift_array_s'] = time.perf_counter() - t0
 
         # Wave statistics per buoy (from reprocess_swift_array outputs)
         for sid in range(22, 26):
@@ -147,7 +170,24 @@ class TheNextWave:
             Dp = float(swift_data.peakwavedirT[0])
             results['wave_stats'][swift_name] = {'Hs': Hs, 'Tp': Tp, 'Dp': Dp}
 
+        # Coordinate origin convention: by default we use the first SWIFT buoy as
+        # the projection origin (matching the existing behavior). Optionally we can
+        # set the origin to the target lat/lon so the target is at (0,0).
+        if bool(self.config.origin_at_target) and wec_lat is not None and wec_lon is not None:
+            try:
+                lat0 = float(np.asarray(wec_lat).reshape((-1,))[0])
+                lon0 = float(np.asarray(wec_lon).reshape((-1,))[0])
+                if np.isfinite(lat0) and np.isfinite(lon0):
+                    self.lat_origin = lat0
+                    self.lon_origin = lon0
+            except Exception:
+                # Best-effort: fall back to the existing SWIFT-origin convention.
+                pass
+
+        t0 = time.perf_counter() if prof_enabled else 0.0
         zin, uin, vin, tin, xin, yin, fs = self.stack_measurement_data(cleaned_sbg)
+        if prof_enabled:
+            prof['stack_measurement_data_s'] = time.perf_counter() - t0
         fs = float(fs)
         if not np.isfinite(fs) or fs <= 0.0:
             if self.logger is not None:
@@ -170,7 +210,10 @@ class TheNextWave:
 
         wavespec_new = None
         if not use_cached:
+            t0 = time.perf_counter() if prof_enabled else 0.0
             wavespec_new = self.build_averaged_wavespec(swift_structs)
+            if prof_enabled:
+                prof['build_averaged_wavespec_s'] = time.perf_counter() - t0
 
         if use_cached:
             wavespec = self.last_wavespec
@@ -212,7 +255,10 @@ class TheNextWave:
                 'No usable wavespec available yet (SBGwaves may still be failing / low energy)'
             )
 
+        t0 = time.perf_counter() if prof_enabled else 0.0
         Te, ce = centroid_period_and_phase_speed(wavespec)
+        if prof_enabled:
+            prof['centroid_period_and_phase_speed_s'] = time.perf_counter() - t0
         if not np.isfinite(Te) or Te <= 0.0:
             raise ValueError(
                 'Computed centroid period Te is invalid (spectrum has zero/NaN energy)'
@@ -272,12 +318,12 @@ class TheNextWave:
         xpred = np.full_like(tpred, x_target, dtype=float)
         ypred = np.full_like(tpred, y_target, dtype=float)
 
-        # Solver mutates wavespec internals; pass copies each call.
-        ws = WaveSpec()
-        ws.theta = wavespec.theta.copy()
-        ws.f = wavespec.f.copy()
-        ws.Etheta = wavespec.Etheta.copy()
+        # `leastSquaresWavePropagation` no longer mutates the wavespec in-place, and
+        # we cache spectrum->solution-space interpolation results on the object.
+        ws = wavespec
 
+        t0 = time.perf_counter() if prof_enabled else 0.0
+        lsq_prof = {} if prof_enabled else None
         pred_vec, recon_vec, params, solve_time = leastSquaresWavePropagation(
             zin[input_slice, :],
             uin[input_slice, :],
@@ -296,7 +342,13 @@ class TheNextWave:
             spectrum_ridge_floor=float(self.config.lsq_spectrum_ridge_floor),
             diagnostics=bool(self.config.lsq_diagnostics_enable),
             near_bound_ratio=float(self.config.lsq_near_bound_ratio),
+            profiling=lsq_prof,
         )
+        if prof_enabled:
+            prof['leastSquaresWavePropagation_total_s'] = time.perf_counter() - t0
+            prof['leastSquaresWavePropagation_reported_solve_s'] = float(solve_time)
+            if isinstance(lsq_prof, dict) and lsq_prof:
+                prof['leastSquaresWavePropagation_breakdown'] = dict(lsq_prof)
         self.A0 = params.A
 
         prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
@@ -306,6 +358,7 @@ class TheNextWave:
 
         # Dense model evaluation at the target (WEC).
         # When disabled, do not apply the solved model to any history/time series.
+        t0 = time.perf_counter() if prof_enabled else 0.0
         t_now = np.array([], dtype=float)
         if self.config.enable_dense_history_projection:
             # If explicit timestamps are provided (e.g., WEC history), use those;
@@ -320,6 +373,8 @@ class TheNextWave:
                 if t_now.ndim == 2 and t_now.shape[1] > 0:
                     t_now = t_now[:, 0]
                 t_now = t_now.reshape((-1,))
+        if prof_enabled:
+            prof['dense_eval_time_prep_s'] = time.perf_counter() - t0
 
         # Optionally clip dense predictions to the last N seconds of the window.
         if self.config.enable_dense_history_projection:
@@ -340,6 +395,7 @@ class TheNextWave:
         dense_predictions_u = np.array([], dtype=float)
         dense_predictions_v = np.array([], dtype=float)
 
+        t0 = time.perf_counter() if prof_enabled else 0.0
         try:
             kx = np.asarray(getattr(params, 'kx', np.array([])), dtype=float).reshape((-1,))
             ky = np.asarray(getattr(params, 'ky', np.array([])), dtype=float).reshape((-1,))
@@ -385,6 +441,8 @@ class TheNextWave:
         except Exception:
             # Best-effort: dense predictions are optional.
             pass
+        if prof_enabled:
+            prof['dense_model_eval_s'] = time.perf_counter() - t0
 
         nbuoys = int(zin.shape[1])
         reconstruction = np.asarray(recon_vec).reshape((win_len, -1), order='F')
@@ -432,6 +490,54 @@ class TheNextWave:
                 'solve_time': float(solve_time),
             }
         )
+
+        if prof_enabled:
+            prof['total_process_s'] = time.perf_counter() - t_prof0
+            results['profiling'] = dict(prof)
+
+            self._profiling_iter += 1
+            every = int(getattr(self.config, 'profiling_log_every_n', 0) or 0)
+            if every > 0 and (self._profiling_iter % every) == 0 and self.logger is not None:
+                ms = {}
+                for k, v in prof.items():
+                    try:
+                        # `prof` can contain non-scalars (e.g., nested dict breakdowns).
+                        # Only include plain numeric scalars in the ms summary.
+                        if isinstance(v, (int, float, np.integer, np.floating)):
+                            ms[k] = 1e3 * float(v)
+                    except Exception:
+                        continue
+                lsq_ms = {}
+                try:
+                    lsq_ms = {
+                        k: 1e3 * float(v)
+                        for k, v in prof.get('leastSquaresWavePropagation_breakdown', {}).items()
+                    }
+                except Exception:
+                    lsq_ms = {}
+
+                interp_ms = float('nan')
+                try:
+                    if 'interp_cache_hit_s' in lsq_ms:
+                        interp_ms = float(lsq_ms.get('interp_cache_hit_s', float('nan')))
+                    else:
+                        interp_ms = float(lsq_ms.get('interp_griddata_s', float('nan')))
+                except Exception:
+                    interp_ms = float('nan')
+                self.logger.info(
+                    'TNW profile [ms]: '
+                    f"reprocess={ms.get('reprocess_swift_array_s', float('nan')):.1f}, "
+                    f"stack={ms.get('stack_measurement_data_s', float('nan')):.1f}, "
+                    f"wavespec={ms.get('build_averaged_wavespec_s', float('nan')):.1f}, "
+                    f"lsq_total={ms.get('leastSquaresWavePropagation_total_s', float('nan')):.1f} "
+                    f"(solver={ms.get('leastSquaresWavePropagation_reported_solve_s', float('nan')):.1f}), "
+                    f"interp={interp_ms:.1f}, "
+                    f"phi={lsq_ms.get('build_phi_s', float('nan')):.1f}, "
+                    f"P={lsq_ms.get('build_P_mats_s', float('nan')):.1f}, "
+                    f"dense_prep={ms.get('dense_eval_time_prep_s', float('nan')):.1f}, "
+                    f"dense_eval={ms.get('dense_model_eval_s', float('nan')):.1f}, "
+                    f"total={ms.get('total_process_s', float('nan')):.1f}"
+                )
 
         return results
 

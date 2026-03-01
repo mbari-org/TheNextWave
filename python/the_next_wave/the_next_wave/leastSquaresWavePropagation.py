@@ -143,6 +143,11 @@ def leastSquaresWavePropagation(
     spectrum_ridge_floor=1e-6,
     diagnostics=False,
     near_bound_ratio=0.95,
+    gram_diagnostics=False,
+    gram_diag_out_dir=None,
+    gram_diag_prefix='lsq',
+    gram_diag_subset_size=256,
+    profiling=None,
 ):
     """
     Phase-resolved prediction of sea surface elevation.
@@ -184,8 +189,29 @@ def leastSquaresWavePropagation(
         If True, print solver diagnostics (iteration count, status, bound ratios).
     near_bound_ratio : float, optional
         Threshold (0–1) for counting coefficients as "near" the box bounds.
+    gram_diagnostics : bool, optional
+        If True, compute and (optionally) plot normalized Gram-matrix structure diagnostics.
+    gram_diag_out_dir : str or None, optional
+        If provided and matplotlib is available, write PNG plots into this directory.
+    gram_diag_prefix : str, optional
+        Prefix for Gram diagnostic output filenames.
+    gram_diag_subset_size : int, optional
+        Number of columns to visualize exactly (subset correlation heatmap size).
 
     """
+    prof = profiling if isinstance(profiling, dict) else None
+    if prof is not None:
+        prof.clear()
+        prof['_t0'] = time.perf_counter()
+
+    def _prof_mark(key: str, t_start: float) -> float:
+        """Record elapsed time (seconds) under `key` and return a new start time."""
+        if prof is not None:
+            prof[key] = float(time.perf_counter() - t_start)
+        return time.perf_counter()
+
+    t_stage = time.perf_counter()
+
     if len(u1) > 0 and len(v1) > 0:
         use_vel = True
     else:
@@ -194,11 +220,30 @@ def leastSquaresWavePropagation(
     # Convert wave spectrum to Cartesian coordinates.
     # Input convention: `wavespec.theta` is compass degrees True, direction waves come FROM.
     # Internally, this solver shifts by 180° to work in the propagation (TO) direction.
-    if wavespec.Etheta.shape[0] == len(wavespec.theta):
-        wavespec.Etheta = wavespec.Etheta.T
+    # IMPORTANT: do not mutate `wavespec` in-place; callers may want to reuse it and
+    # we cache derived interpolation products on the object.
+    theta_deg = np.asarray(wavespec.theta, dtype=float).reshape((-1,))
+    Etheta = np.asarray(wavespec.Etheta, dtype=float)
+    if Etheta.ndim == 2 and Etheta.shape[0] == theta_deg.size:
+        Etheta = Etheta.T
 
-    theta_deg = wavespec.theta
-    Etheta = wavespec.Etheta
+    f_in = np.asarray(wavespec.f, dtype=float).reshape((-1,))
+
+    # Cache expensive spectrum->solution-space interpolation when wavespec is unchanged.
+    # The cache lives on the `wavespec` instance.
+    cache = getattr(wavespec, '_lsq_interp_cache', None)
+    sig = (
+        int(theta_deg.size),
+        tuple(theta_deg.shape),
+        int(f_in.size),
+        tuple(f_in.shape),
+        tuple(Etheta.shape),
+        int(Etheta.__array_interface__['data'][0]) if hasattr(Etheta, '__array_interface__') else 0,
+        int(f_in.__array_interface__['data'][0]) if hasattr(f_in, '__array_interface__') else 0,
+        int(theta_deg.__array_interface__['data'][0])
+        if hasattr(theta_deg, '__array_interface__')
+        else 0,
+    )
 
     # unique(theta,'last') behaviour
     unique_vals = np.unique(theta_deg)  # sorted unique values
@@ -216,22 +261,23 @@ def leastSquaresWavePropagation(
     t[t > 360.0] -= 360.0
     I_sort = np.argsort(t)
 
-    wavespec.theta = theta_u.copy()
-    wavespec.Etheta = Etheta_u[:, I_sort]
+    theta_u_sorted = theta_u.copy()
+    Etheta_u_sorted = Etheta_u[:, I_sort]
 
-    E_for_peak = wavespec.Etheta
+    t_stage = _prof_mark('spectrum_prep_s', t_stage)
+
+    E_for_peak = Etheta_u_sorted
     n_freq, n_dir = E_for_peak.shape
     flat_F = E_for_peak.flatten(order='F')
     idx_flat = int(np.argmax(flat_F))
     col_idx = idx_flat // n_freq
-    DTp = np.deg2rad(wavespec.theta[col_idx])  # radians
+    DTp = np.deg2rad(theta_u_sorted[col_idx])  # radians
 
-    f = np.asarray(wavespec.f, dtype=float)
+    f = f_in
     df = np.gradient(f)
 
-    wavespec.E = trapz(wavespec.Etheta.T, x=wavespec.theta, axis=0)
-
-    mask = (df * wavespec.E) / np.max(df * wavespec.E) >= 0.05
+    E_1d = trapz(Etheta_u_sorted.T, x=theta_u_sorted, axis=0)
+    mask = (df * E_1d) / np.max(df * E_1d) >= 0.05
     frange_idx = np.nonzero(mask)[0]
     if frange_idx.size == 0:
         raise RuntimeError('No frequencies satisfy 5% cutoff')
@@ -248,6 +294,8 @@ def leastSquaresWavePropagation(
     theta[theta > 2.0 * np.pi] -= 2.0 * np.pi
     theta[theta < 0.0] += 2.0 * np.pi
     theta = np.sort(theta)  # (25,)
+
+    t_stage = _prof_mark('build_k_theta_s', t_stage)
 
     # Reshape, build kx, ky, omega
     # print(f'{DTp=}')
@@ -281,53 +329,99 @@ def leastSquaresWavePropagation(
     if len(x2) != N_output_pts or len(y2) != N_output_pts:
         print('Error: All output vectors must be equal length', flush=True)
 
-    # Interpolate measured spectrum to solution space
-    F, T = np.meshgrid(wavespec.f, wavespec.theta)       # (M, N)
-    f2, thet2 = np.meshgrid(np.sqrt(k * 9.8), theta)     # target grid
-    points = np.column_stack((F.ravel(), T.ravel()))
-    values = np.log10(wavespec.Etheta.T).ravel()
-    xi = (f2 / (2.0 * np.pi), np.degrees(thet2))
-    zi_log = spint.griddata(points, values, xi, method='linear')
-    Ei = 10.0 ** zi_log
-    Ei[np.isnan(Ei)] = 0.0
+    # Interpolate measured spectrum to solution space.
+    # This is expensive (`griddata`), so reuse cached results when possible.
+    if isinstance(cache, dict) and cache.get('sig') == sig:
+        k = cache['k']
+        theta = cache['theta']
+        kx = cache['kx']
+        ky = cache['ky']
+        omega = cache['omega']
+        Ei = cache['Ei']
+        good = cache['good']
+        amps_base = cache['amps_base']
+        f2 = cache['f2']
+        thet2 = cache['thet2']
+        t_stage = _prof_mark('interp_cache_hit_s', t_stage)
+    else:
+        F, T = np.meshgrid(f, theta_u_sorted)  # (n_dir, n_freq)
+        f2, thet2 = np.meshgrid(np.sqrt(k * 9.8), theta)  # target grid
+        points = np.column_stack((F.ravel(), T.ravel()))
+        values = np.log10(Etheta_u_sorted.T).ravel()
+        xi = (f2 / (2.0 * np.pi), np.degrees(thet2))
+        zi_log = spint.griddata(points, values, xi, method='linear')
+        Ei = 10.0 ** zi_log
+        Ei[np.isnan(Ei)] = 0.0
+        t_stage = _prof_mark('interp_griddata_s', t_stage)
 
-    Ei *= trapz(wavespec.E, x=wavespec.f, axis=0) / trapz(
-        trapz(Ei, x=np.degrees(thet2[:, 0]), axis=0),
-        x=f2[0, :] / (2.0 * np.pi),
-        axis=0,
-    )
+        Ei *= trapz(E_1d, x=f, axis=0) / trapz(
+            trapz(Ei, x=np.degrees(thet2[:, 0]), axis=0),
+            x=f2[0, :] / (2.0 * np.pi),
+            axis=0,
+        )
+        t_stage = _prof_mark('interp_renorm_s', t_stage)
 
-    amps = np.sqrt(
-        Ei * np.diff(
-            f2[0, :] / (2.0 * np.pi),
-            prepend=0.0
-        ) * sps.mode(
-            np.diff(np.degrees(thet2[:, 0])),
-            axis=None,
-            keepdims=False
-        ).mode.item()
-    )
-    amps = amps.T
-    amps = np.concatenate((amps.flatten(order='F'),
-                           amps.flatten(order='F')), axis=0)
-    amps[np.isnan(amps)] = 0.0
+        dtheta_mode_deg = (
+            sps.mode(
+                np.diff(np.degrees(thet2[:, 0])),
+                axis=None,
+                keepdims=False,
+            )
+            .mode
+            .item()
+        )
+        df2 = np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
+        amps = np.sqrt(Ei * df2 * dtheta_mode_deg)
+        amps_base = amps.T.flatten(order='F')
+        amps_base[np.isnan(amps_base)] = 0.0
+        good = np.nonzero(amps_base != 0.0)[0]
+        t_stage = _prof_mark('build_amps_s', t_stage)
+
+        try:
+            wavespec._lsq_interp_cache = {
+                'sig': sig,
+                'k': k,
+                'theta': theta,
+                'kx': kx,
+                'ky': ky,
+                'omega': omega,
+                'Ei': Ei,
+                'good': good,
+                'amps_base': amps_base,
+                'f2': f2,
+                'thet2': thet2,
+            }
+        except Exception:
+            pass
+
+    # Drop zero-energy base components before building phi/cos/sin.
+    good_base = np.asarray(good, dtype=int).reshape((-1,))
+    if good_base.size > 0 and good_base.size < int(np.asarray(kx).size):
+        kx = np.asarray(kx, dtype=float).reshape((-1,))[good_base]
+        ky = np.asarray(ky, dtype=float).reshape((-1,))[good_base]
+        omega = np.asarray(omega, dtype=float).reshape((-1,))[good_base]
+        amps_base = np.asarray(amps_base, dtype=float).reshape((-1,))[good_base]
+
+    amps = np.concatenate((amps_base, amps_base), axis=0)
 
     # reshape coordinates for phi matrices
     x1 = x1.reshape((-1, 1), order='F')
     x2 = x2.reshape((-1, 1), order='F')
     y1 = y1.reshape((-1, 1), order='F')
     y2 = y2.reshape((-1, 1), order='F')
-    kx = kx.reshape((-1, 1), order='F')
+    kx = np.asarray(kx, dtype=float).reshape((-1, 1), order='F')
     # print(f'{kx.mean()=}')
-    ky = ky.reshape((-1, 1), order='F')
+    ky = np.asarray(ky, dtype=float).reshape((-1, 1), order='F')
     # print(f'{ky.mean()=}')
     t1 = t1.reshape((-1, 1), order='F')
     t2 = t2.reshape((-1, 1), order='F')
-    omega = omega.reshape((-1, 1), order='F')
+    omega = np.asarray(omega, dtype=float).reshape((-1, 1), order='F')
 
     # Propagator matrices
     phi1 = x1 @ kx.T + y1 @ ky.T - t1 @ omega.T
     phi2 = x2 @ kx.T + y2 @ ky.T - t2 @ omega.T
+
+    t_stage = _prof_mark('build_phi_s', t_stage)
 
     if use_vel:
         P1_11 = np.cos(phi1)
@@ -359,13 +453,17 @@ def leastSquaresWavePropagation(
         P1 = np.hstack([np.cos(phi1), np.sin(phi1)])
         P2 = np.hstack([np.cos(phi2), np.sin(phi2)])
 
-    good = np.nonzero(amps[:np.size(Ei)] != 0)[0]
+    t_stage = _prof_mark('build_P_mats_s', t_stage)
+
+    # Safety: handle any remaining exact zeros.
     zero_mask = (amps == 0)
     if zero_mask.any():
         keep_mask = ~zero_mask
         P1 = P1[:, keep_mask]
         P2 = P2[:, keep_mask]
         amps = amps[keep_mask]
+
+    t_stage = _prof_mark('prune_zero_cols_s', t_stage)
 
     # RHS vector
     if use_vel:
@@ -375,11 +473,14 @@ def leastSquaresWavePropagation(
     else:
         b = np.asarray(z1).ravel(order='F')
 
+    t_stage = _prof_mark('build_rhs_s', t_stage)
+
     # print(f'{P1.shape=}')
     # print(f'{P2.mean()=}')
     # print(f'{b.mean()=}')
 
     t_0 = time.time()
+    t_stage_solve = time.perf_counter()
 
     lb = -amps / np.sqrt(2.0)
     ub = amps / np.sqrt(2.0)
@@ -403,8 +504,27 @@ def leastSquaresWavePropagation(
     )
 
     t = time.time() - t_0
+    if prof is not None:
+        prof['solve_total_s'] = float(time.perf_counter() - t_stage_solve)
     print(f'solve time: {t:.4f} s', flush=True)
     # print(f'{A.sum()=}')
+
+    gram_diag = None
+    if gram_diagnostics:
+        try:
+            from .gram_diagnostics import gram_diagnostics as _gram_diagnostics
+
+            gram_diag = _gram_diagnostics(
+                P1,
+                subset_size=int(gram_diag_subset_size),
+                out_dir=gram_diag_out_dir,
+                prefix=str(gram_diag_prefix),
+            )
+        except Exception as exc:
+            if diagnostics:
+                print(f'Gram diag: failed: {exc}', flush=True)
+
+    t_stage = _prof_mark('gram_diag_s', t_stage)
 
     # Diagnostics: are coefficients sitting on bounds?
     # This helps distinguish a well-posed solve from an extrapolation/under-regularized solve.
@@ -449,10 +569,25 @@ def leastSquaresWavePropagation(
             flush=True,
         )
 
+        if gram_diag is not None:
+            print(
+                'Gram diag: '
+                f'm={gram_diag.n_rows} n={gram_diag.n_cols} '
+                f'offdiag_F_est={gram_diag.offdiag_fro_norm_est:.3e} '
+                f'offdiag_rms_est={gram_diag.offdiag_rms_est:.3e} '
+                f'max_abs_offdiag_sample={gram_diag.max_abs_offdiag_sample:.3e} '
+                f'n_pairs={gram_diag.n_pairs_sampled}',
+                flush=True,
+            )
+
+    t_stage = _prof_mark('diagnostics_s', t_stage)
+
     # reconstructed fields
     zc = P1 @ A
     z2 = P2 @ A
     # print(f'{zc=} {z2=}')
+
+    t_stage = _prof_mark('recon_s', t_stage)
 
     # bookkeeping into params
     params = LSQWavePropParams()
@@ -465,7 +600,7 @@ def leastSquaresWavePropagation(
     params.solver_nit = int(getattr(info, 'nit', 0) or 0)
     params.solver_status = int(getattr(info, 'status', 0) or 0)
     params.Etheta = np.zeros_like(Ei.flatten(order='F')).T
-    params.Etheta[good] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
+    params.Etheta[good_base] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
     params.Etheta = params.Etheta.reshape((len(k), len(theta)), order='F').T
     params.Etheta /= (
         np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
@@ -484,10 +619,19 @@ def leastSquaresWavePropagation(
     params.theta = params.theta[sort_idx].flatten()
     params.Etheta = params.Etheta[sort_idx, :].T
 
-    params.kx = kx[good].flatten()
-    params.ky = ky[good].flatten()
-    params.omega = omega[good].flatten()
+    # After pruning, `kx/ky/omega` already correspond to the kept components.
+    # Do not index them with `good` (which refers to base-grid indices).
+    params.kx = np.asarray(kx, dtype=float).reshape((-1,))
+    params.ky = np.asarray(ky, dtype=float).reshape((-1,))
+    params.omega = np.asarray(omega, dtype=float).reshape((-1,))
     params.use_vel = use_vel
+
+    t_stage = _prof_mark('params_pack_s', t_stage)
+
+    if prof is not None:
+        prof['total_lsq_func_s'] = float(time.perf_counter() - float(prof.get('_t0', t_stage)))
+        # Remove private key to keep logs/results clean.
+        prof.pop('_t0', None)
 
     # import sys; sys.exit(0)
 

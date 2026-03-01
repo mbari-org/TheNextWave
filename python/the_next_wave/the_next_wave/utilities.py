@@ -24,6 +24,42 @@ Reusable functions extracted from example.py for use in the_next_wave_node.py an
 import numpy as np
 import utm
 
+try:
+    from pyproj import CRS, Transformer
+
+    _HAS_PYPROJ = True
+except Exception:  # pragma: no cover
+    CRS = None
+    Transformer = None
+    _HAS_PYPROJ = False
+
+_UTM_TRANSFORMER_CACHE: dict[tuple[int, bool], tuple[object, object]] = {}
+
+
+def _get_pyproj_utm_transformers(zone_num: int, northern: bool):
+    """Return (fwd, inv) pyproj Transformers for WGS84<->UTM zone.
+
+    Uses EPSG:
+      - 326xx for northern hemisphere
+      - 327xx for southern hemisphere
+    """
+    key = (int(zone_num), bool(northern))
+    cached = _UTM_TRANSFORMER_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if not _HAS_PYPROJ:
+        raise RuntimeError('pyproj not available')
+
+    crs_ll = CRS.from_epsg(4326)
+    epsg = (32600 + int(zone_num)) if northern else (32700 + int(zone_num))
+    crs_utm = CRS.from_epsg(epsg)
+    fwd = Transformer.from_crs(crs_ll, crs_utm, always_xy=True)
+    inv = Transformer.from_crs(crs_utm, crs_ll, always_xy=True)
+    _UTM_TRANSFORMER_CACHE[key] = (fwd, inv)
+    return fwd, inv
+
+
 from .swift import WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 
@@ -143,12 +179,29 @@ def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
 
     e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
 
+    # Fast path: vectorized pyproj transform (dramatically faster than per-sample
+    # Python loop over utm.from_latlon). Fall back to utm if pyproj unavailable.
     e = np.empty_like(lat, dtype=float)
     n = np.empty_like(lat, dtype=float)
-    for i in range(lat.size):
-        ei, ni, zn, zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
-        e.flat[i] = ei
-        n.flat[i] = ni
+    if _HAS_PYPROJ:
+        try:
+            northern = bool(float(lat0) >= 0.0)
+            fwd, _inv = _get_pyproj_utm_transformers(int(zone_num), northern)
+            lon_flat = np.asarray(lon, dtype=float).reshape((-1,))
+            lat_flat = np.asarray(lat, dtype=float).reshape((-1,))
+            e_flat, n_flat = fwd.transform(lon_flat, lat_flat)
+            e[:] = np.asarray(e_flat, dtype=float).reshape(lat.shape)
+            n[:] = np.asarray(n_flat, dtype=float).reshape(lat.shape)
+        except Exception:
+            for i in range(lat.size):
+                ei, ni, _zn, _zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
+                e.flat[i] = ei
+                n.flat[i] = ni
+    else:
+        for i in range(lat.size):
+            ei, ni, _zn, _zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
+            e.flat[i] = ei
+            n.flat[i] = ni
 
     dx = e - e0
     dy = n - n0
@@ -195,20 +248,36 @@ def generic_coordinate_transform_inverse(x, y, lat0, lon0, rotation_deg):
     # Get reference UTM coordinates
     e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
 
-    e = dx + e0
-    n = dy + n0
+    e = e0 + dx
+    n = n0 + dy
 
-    # Convert back to lat/lon
     lat = np.empty_like(x, dtype=float)
     lon = np.empty_like(x, dtype=float)
-    for i in range(x.size):
-        # Debug: print conversion inputs/outputs for this point if needed.
-        lat.flat[i], lon.flat[i] = utm.to_latlon(
-            float(e.flat[i]),
-            float(n.flat[i]),
-            zone_num,
-            zone_let,
-        )
+    if _HAS_PYPROJ:
+        try:
+            northern = bool(float(lat0) >= 0.0)
+            _fwd, inv = _get_pyproj_utm_transformers(int(zone_num), northern)
+            e_flat = np.asarray(e, dtype=float).reshape((-1,))
+            n_flat = np.asarray(n, dtype=float).reshape((-1,))
+            lon_flat, lat_flat = inv.transform(e_flat, n_flat)
+            lat[:] = np.asarray(lat_flat, dtype=float).reshape(x.shape)
+            lon[:] = np.asarray(lon_flat, dtype=float).reshape(x.shape)
+        except Exception:
+            for i in range(x.size):
+                lat.flat[i], lon.flat[i] = utm.to_latlon(
+                    float(e.flat[i]),
+                    float(n.flat[i]),
+                    zone_num,
+                    zone_let,
+                )
+    else:
+        for i in range(x.size):
+            lat.flat[i], lon.flat[i] = utm.to_latlon(
+                float(e.flat[i]),
+                float(n.flat[i]),
+                zone_num,
+                zone_let,
+            )
 
     return lat, lon
 
@@ -634,6 +703,17 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         lat = np.asarray(sbg.GpsPos.lat, dtype=float)
         lon = np.asarray(sbg.GpsPos.long, dtype=float)
 
+        # Optional cached absolute UTM coordinates (computed at ingest time).
+        # When present and aligned, these avoid re-projecting the full window.
+        east = None
+        north = None
+        try:
+            east = np.asarray(getattr(sbg.GpsPos, 'easting'), dtype=float)
+            north = np.asarray(getattr(sbg.GpsPos, 'northing'), dtype=float)
+        except Exception:
+            east = None
+            north = None
+
         if skipwarmup is not None or burstend is not None:
             start = int(skipwarmup) if skipwarmup is not None else 0
             stop = int(burstend) if burstend is not None else None
@@ -643,8 +723,13 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
             v = v[start:stop]
             lat = lat[start:stop]
             lon = lon[start:stop]
+            if east is not None and north is not None:
+                east = east[start:stop]
+                north = north[start:stop]
 
         n_local = int(min(z.size, ztime.size, u.size, v.size, lat.size, lon.size))
+        if east is not None and north is not None:
+            n_local = int(min(n_local, east.size, north.size))
         if n_local <= 0:
             continue
         if n_local != z.size:
@@ -660,7 +745,36 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         if n_local != lon.size:
             lon = lon[:n_local]
 
-        x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
+        if east is not None and north is not None:
+            if n_local != east.size:
+                east = east[:n_local]
+            if n_local != north.size:
+                north = north[:n_local]
+
+        # If cached UTM is present but mostly non-finite, ignore it.
+        if east is not None and north is not None:
+            try:
+                if int(np.count_nonzero(np.isfinite(east) & np.isfinite(north))) < max(
+                    1, int(0.9 * n_local)
+                ):
+                    east = None
+                    north = None
+            except Exception:
+                east = None
+                north = None
+
+        if east is not None and north is not None:
+            # Convert absolute UTM -> local x/y in meters relative to origin.
+            e0, n0, _zone_num, _zone_let = utm.from_latlon(float(latorigin), float(lonorigin))
+            dx = np.asarray(east, dtype=float) - float(e0)
+            dy = np.asarray(north, dtype=float) - float(n0)
+            ang = np.deg2rad(rotation)
+            c = np.cos(ang)
+            s = np.sin(ang)
+            x = dx * c + dy * s
+            y = -dx * s + dy * c
+        else:
+            x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
 
         x = np.asarray(x, dtype=float).reshape((-1,))
         y = np.asarray(y, dtype=float).reshape((-1,))

@@ -13,6 +13,8 @@ import threading
 import time
 import traceback
 
+import utm
+
 from builtin_interfaces.msg import Time as TimeMsg
 from buoy_api.interface import Interface
 from buoy_interfaces.msg import WavePredictionOutput, WavePredictionPoint
@@ -32,7 +34,7 @@ from the_next_wave.utilities import (
 @dataclass
 class TheNextWaveNodeParams:
     window_duration_sec: float = 256.0
-    processing_interval_sec: float = 2.0
+    processing_interval_sec: float = 0.85
     expected_fs: float = 5.0
     # Rotation applied in the lat/lon <-> local x/y projection (clockwise-positive).
     # For sim / incident-wave latent inputs, x/y and u/v are already world ENU
@@ -40,6 +42,14 @@ class TheNextWaveNodeParams:
     # If you set `rotation_deg != 0`, you must rotate u/v consistently (the current
     # pipeline does not do that automatically).
     rotation_deg: float = 0.0
+
+    # If True, use the target (WEC) lat/lon as the origin of the local x/y
+    # projection so the target appears at (0,0) and all buoy positions are
+    # relative to the target.
+    #
+    # Note: in TCP-bridge modes (tcp replay / example-frame), keep this False to
+    # preserve the existing convention.
+    origin_at_target: bool = False
     flip_z_sign: bool = True
     n_te: float = 10.0
 
@@ -80,6 +90,10 @@ class TheNextWaveNodeParams:
     mem_moment_cap_enable: bool = False
     mem_moment_cap: float = 0.999
 
+    # Optional stage timing for performance debugging.
+    profiling_enable: bool = True
+    profiling_log_every_n: int = 1
+
     def __str__(self) -> str:
         swift_idx_str = dict(self.swift_idx)
         port_map_str = dict(sorted(self.sbg_bridge_port_by_swift.items()))
@@ -90,6 +104,7 @@ class TheNextWaveNodeParams:
                 f'  processing_interval_sec={self.processing_interval_sec},',
                 f'  expected_fs={self.expected_fs},',
                 f'  rotation_deg={self.rotation_deg},',
+                f'  origin_at_target={self.origin_at_target},',
                 f'  n_te={self.n_te},',
                 f'  downsample_to_hz={self.downsample_to_hz},',
                 f'  wavespec_update_period_sec={self.wavespec_update_period_sec},',
@@ -118,6 +133,8 @@ class TheNextWaveNodeParams:
                 f'  lsq_near_bound_ratio={self.lsq_near_bound_ratio},',
                 f'  mem_moment_cap_enable={self.mem_moment_cap_enable},'
                 f'  mem_moment_cap={self.mem_moment_cap},'
+                f'  profiling_enable={self.profiling_enable},'
+                f'  profiling_log_every_n={self.profiling_log_every_n},'
                 ')',
             ]
         )
@@ -174,6 +191,8 @@ class TheNextWaveNode(Interface):
 
         self.set_params()
 
+        self._profiling_iter = 0
+
         # RNG for sim latent noise floor (used only in latent_callback).
         try:
             self._latent_rng = np.random.default_rng(int(self.params.latent_noise_seed))
@@ -190,6 +209,7 @@ class TheNextWaveNode(Interface):
             config=TheNextWaveConfig(
                 expected_fs=self.params.expected_fs,
                 rotation_deg=self.params.rotation_deg,
+                origin_at_target=self.params.origin_at_target,
                 flip_z_sign=self.params.flip_z_sign,
                 n_te=self.params.n_te,
                 wavespec_update_period_sec=self.params.wavespec_update_period_sec,
@@ -203,6 +223,8 @@ class TheNextWaveNode(Interface):
                 lsq_near_bound_ratio=self.params.lsq_near_bound_ratio,
                 mem_moment_cap_enable=self.params.mem_moment_cap_enable,
                 mem_moment_cap=self.params.mem_moment_cap,
+                profiling_enable=self.params.profiling_enable,
+                profiling_log_every_n=self.params.profiling_log_every_n,
             ),
             logger=self.get_logger(),
         )
@@ -271,6 +293,10 @@ class TheNextWaveNode(Interface):
             sbg.GpsPos.time_stamp = deque()
             sbg.GpsPos.lat = deque()
             sbg.GpsPos.long = deque()
+            # Cache absolute UTM coordinates at ingest time so the processing loop
+            # doesn't need to re-project an entire 256s window every run.
+            sbg.GpsPos.easting = deque()
+            sbg.GpsPos.northing = deque()
             setattr(self.swifts, f'sbg{sid}', sbg)
 
     def process_timer_callback(self):
@@ -303,6 +329,8 @@ class TheNextWaveNode(Interface):
 
     def run_wave_processing(self):
         try:
+            t_total_start = time.perf_counter()
+            t_snapshot_start = time.perf_counter()
             with self.data_lock:
                 swifts_snapshot = SWIFTArray()
                 for sid in range(22, 26):
@@ -325,6 +353,14 @@ class TheNextWaveNode(Interface):
                     )
                     sbg_dst.GpsPos.lat = np.array(sbg_src.GpsPos.lat, dtype=np.float64)
                     sbg_dst.GpsPos.long = np.array(sbg_src.GpsPos.long, dtype=np.float64)
+                    sbg_dst.GpsPos.easting = np.array(
+                        getattr(sbg_src.GpsPos, 'easting', []),
+                        dtype=np.float64,
+                    )
+                    sbg_dst.GpsPos.northing = np.array(
+                        getattr(sbg_src.GpsPos, 'northing', []),
+                        dtype=np.float64,
+                    )
                     setattr(swifts_snapshot, f'sbg{sid}', sbg_dst)
 
                 wec_lat = self.wec_lat
@@ -334,6 +370,9 @@ class TheNextWaveNode(Interface):
                 )
                 wec_actual_hist = list(self.wec_actual_hist) if self.wec_actual_hist else []
 
+            t_snapshot_end = time.perf_counter()
+
+            t_example_frame_start = time.perf_counter()
             if (
                 (wec_lat is None or wec_lon is None)
                 and self.params.sbg_bridge_enable
@@ -354,16 +393,24 @@ class TheNextWaveNode(Interface):
                     wec_lat = None
                     wec_lon = None
 
+            t_example_frame_end = time.perf_counter()
+
+            t_dense_eval_time_start = time.perf_counter()
             dense_eval_time_s = None
             if self.params.enable_dense_history_projection and wec_actual_hist:
                 dense_eval_time_s = np.asarray([float(p[0]) for p in wec_actual_hist], dtype=float)
 
+            t_dense_eval_time_end = time.perf_counter()
+
+            t_predictor_start = time.perf_counter()
             results = self.predictor.process(
                 swifts_snapshot,
                 wec_lat=wec_lat,
                 wec_lon=wec_lon,
                 dense_eval_time_s=dense_eval_time_s,
             )
+
+            t_predictor_end = time.perf_counter()
 
             window_end_time = float(results.get('window_end_time', float('nan')))
             wec_hist_filtered = []
@@ -397,7 +444,45 @@ class TheNextWaveNode(Interface):
 
             results['wec_actual'] = wec_at_window_end
             results['wec_actual_series'] = wec_hist_filtered
+            t_postprocess_end = time.perf_counter()
+            t_publish_start = time.perf_counter()
             self.publish_prediction(results)
+            t_publish_end = time.perf_counter()
+
+            self._profiling_iter += 1
+            if self.params.profiling_enable:
+                log_every_n = int(self.params.profiling_log_every_n)
+                if log_every_n <= 0:
+                    log_every_n = 1
+                if (self._profiling_iter % log_every_n) == 0:
+                    total_s = time.perf_counter() - t_total_start
+                    snapshot_s = t_snapshot_end - t_snapshot_start
+                    example_frame_s = t_example_frame_end - t_example_frame_start
+                    dense_eval_time_s_build = t_dense_eval_time_end - t_dense_eval_time_start
+                    predictor_s = t_predictor_end - t_predictor_start
+                    postprocess_s = t_postprocess_end - t_predictor_end
+                    publish_s = t_publish_end - t_publish_start
+                    core_total_s = float('nan')
+                    try:
+                        core_total_s = float(results.get('profiling', {}).get('total_process_s'))
+                    except Exception:
+                        core_total_s = float('nan')
+
+                    self.get_logger().info(
+                        'Wave processing timing (node outer loop): '
+                        f'total={1e3 * total_s:.1f} ms '
+                        f'snapshot={1e3 * snapshot_s:.1f} '
+                        f'example_frame={1e3 * example_frame_s:.1f} '
+                        f'dense_eval_time={1e3 * dense_eval_time_s_build:.1f} '
+                        f'predictor={1e3 * predictor_s:.1f} '
+                        f'postprocess={1e3 * postprocess_s:.1f} '
+                        f'publish={1e3 * publish_s:.1f} '
+                        f'core_total={1e3 * core_total_s:.1f}'
+                    )
+
+            print(
+                f'Wave processing complete in {(time.perf_counter() - t_total_start):.3f} s'
+            )
 
         except ValueError as e:
             # Warmup/transient condition: wave spectra may not be usable yet.
@@ -802,6 +887,21 @@ class TheNextWaveNode(Interface):
         sbg.GpsPos.lat.append(float(lat))
         sbg.GpsPos.long.append(float(lon))
 
+        # Cache absolute UTM (easting/northing) per sample.
+        # This lets the processing loop convert to local x/y via subtraction from
+        # the current origin UTM coordinate + rotation, without per-sample projection.
+        try:
+            e, n, _zone_num, _zone_let = utm.from_latlon(float(lat), float(lon))
+            getattr(sbg.GpsPos, 'easting').append(float(e))
+            getattr(sbg.GpsPos, 'northing').append(float(n))
+        except Exception:
+            # Best-effort; code will fall back to projecting from lat/lon.
+            try:
+                getattr(sbg.GpsPos, 'easting').append(float('nan'))
+                getattr(sbg.GpsPos, 'northing').append(float('nan'))
+            except Exception:
+                pass
+
         self.maintain_sbg_window(sbg, t_us, swift_num)
 
         if self.last_process_time_us is None:
@@ -826,6 +926,8 @@ class TheNextWaveNode(Interface):
         sbg.GpsPos.time_stamp = deque()
         sbg.GpsPos.lat = deque()
         sbg.GpsPos.long = deque()
+        sbg.GpsPos.easting = deque()
+        sbg.GpsPos.northing = deque()
 
         self.window_ready_by_swift[swift_num] = False
         self.window_ready = bool(self.window_ready_by_swift) and all(
@@ -861,6 +963,11 @@ class TheNextWaveNode(Interface):
                 sbg.GpsPos.time_stamp.popleft()
                 sbg.GpsPos.lat.popleft()
                 sbg.GpsPos.long.popleft()
+                # Keep cached UTM arrays aligned.
+                if hasattr(sbg.GpsPos, 'easting'):
+                    sbg.GpsPos.easting.popleft()
+                if hasattr(sbg.GpsPos, 'northing'):
+                    sbg.GpsPos.northing.popleft()
         except IndexError:
             # If any field gets out of sync (shouldn't happen), reset to recover.
             self.get_logger().warn(f'swift{swift_num} window deques out of sync; resetting')
@@ -952,6 +1059,10 @@ class TheNextWaveNode(Interface):
         self.declare_parameter('mem_moment_cap_enable', defaults.mem_moment_cap_enable)
         self.declare_parameter('mem_moment_cap', defaults.mem_moment_cap)
 
+        # Optional: timing/profiling (also enables core pipeline profiling).
+        self.declare_parameter('profiling_enable', defaults.profiling_enable)
+        self.declare_parameter('profiling_log_every_n', defaults.profiling_log_every_n)
+
         for idx, sid in enumerate(range(22, 26)):
             self.declare_parameter(f'swifts.swift{sid}', idx + 1)
 
@@ -963,6 +1074,9 @@ class TheNextWaveNode(Interface):
             'sbg_bridge_socket_timeout_sec',
             defaults.sbg_bridge_socket_timeout_sec,
         )
+
+        sbg_bridge_enable = bool(self.get_parameter('sbg_bridge_enable').value)
+        self.declare_parameter('origin_at_target', (not sbg_bridge_enable))
 
         # Optional: sim latent noise floor to avoid MEM singularities.
         self.declare_parameter('latent_noise_std_z_m', defaults.latent_noise_std_z_m)
@@ -978,7 +1092,7 @@ class TheNextWaveNode(Interface):
         self.declare_parameter('example_xtarget', defaults.example_xtarget)
         self.declare_parameter('example_ytarget', defaults.example_ytarget)
 
-        params.sbg_bridge_enable = bool(self.get_parameter('sbg_bridge_enable').value)
+        params.sbg_bridge_enable = sbg_bridge_enable
         params.sbg_bridge_bind = str(self.get_parameter('sbg_bridge_bind').value)
         params.sbg_bridge_socket_timeout_sec = float(
             self.get_parameter('sbg_bridge_socket_timeout_sec').value
@@ -1001,6 +1115,7 @@ class TheNextWaveNode(Interface):
         params.downsample_to_hz = float(self.get_parameter('downsample_to_hz').value)
 
         params.rotation_deg = float(self.get_parameter('rotation_deg').value)
+        params.origin_at_target = bool(self.get_parameter('origin_at_target').value)
         params.flip_z_sign = bool(self.get_parameter('flip_z_sign').value)
         params.wavespec_update_period_sec = float(
             self.get_parameter('wavespec_update_period_sec').value
@@ -1026,6 +1141,9 @@ class TheNextWaveNode(Interface):
 
         params.mem_moment_cap_enable = bool(self.get_parameter('mem_moment_cap_enable').value)
         params.mem_moment_cap = float(self.get_parameter('mem_moment_cap').value)
+
+        params.profiling_enable = bool(self.get_parameter('profiling_enable').value)
+        params.profiling_log_every_n = int(self.get_parameter('profiling_log_every_n').value)
 
         swift_params = self.get_parameters_by_prefix('swifts')  # keys: 'swift22', 'swift23', ...
 
