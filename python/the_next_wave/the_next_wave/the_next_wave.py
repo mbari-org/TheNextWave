@@ -102,7 +102,7 @@ class TheNextWave:
         self.lon_origin: float | None = None
         self.last_wavespec: WaveSpec | None = None
         self.last_wavespec_time_s: float | None = None
-        self._profiling_iter: int = 0
+        self.profiling_iter: int = 0
 
     def wavespec_is_usable(self, ws: WaveSpec | None) -> bool:
         if ws is None:
@@ -217,6 +217,10 @@ class TheNextWave:
 
         if use_cached:
             wavespec = self.last_wavespec
+            if prof_enabled and 'build_averaged_wavespec_s' not in prof:
+                # Explicitly report that we reused the cached wavespec.
+                # Keeps downstream profiling logs from printing `nan`.
+                prof['build_averaged_wavespec_s'] = 0.0
         elif self.wavespec_is_usable(wavespec_new):
             wavespec = wavespec_new
             self.last_wavespec = wavespec_new
@@ -495,9 +499,9 @@ class TheNextWave:
             prof['total_process_s'] = time.perf_counter() - t_prof0
             results['profiling'] = dict(prof)
 
-            self._profiling_iter += 1
+            self.profiling_iter += 1
             every = int(getattr(self.config, 'profiling_log_every_n', 0) or 0)
-            if every > 0 and (self._profiling_iter % every) == 0 and self.logger is not None:
+            if every > 0 and (self.profiling_iter % every) == 0 and self.logger is not None:
                 ms = {}
                 for k, v in prof.items():
                     try:
@@ -524,14 +528,15 @@ class TheNextWave:
                         interp_ms = float(lsq_ms.get('interp_griddata_s', float('nan')))
                 except Exception:
                     interp_ms = float('nan')
+                solver_ms = ms.get('leastSquaresWavePropagation_reported_solve_s', float('nan'))
                 self.logger.info(
                     'TNW profile [ms]: '
                     f"reprocess={ms.get('reprocess_swift_array_s', float('nan')):.1f}, "
                     f"stack={ms.get('stack_measurement_data_s', float('nan')):.1f}, "
                     f"wavespec={ms.get('build_averaged_wavespec_s', float('nan')):.1f}, "
                     f"lsq_total={ms.get('leastSquaresWavePropagation_total_s', float('nan')):.1f} "
-                    f"(solver={ms.get('leastSquaresWavePropagation_reported_solve_s', float('nan')):.1f}), "
-                    f"interp={interp_ms:.1f}, "
+                    f'(solver={solver_ms:.1f}), '
+                    f'interp={interp_ms:.1f}, '
                     f"phi={lsq_ms.get('build_phi_s', float('nan')):.1f}, "
                     f"P={lsq_ms.get('build_P_mats_s', float('nan')):.1f}, "
                     f"dense_prep={ms.get('dense_eval_time_prep_s', float('nan')):.1f}, "

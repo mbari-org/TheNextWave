@@ -20,9 +20,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from the_next_wave import sbgMessageParse
-from the_next_wave.download_example_data import get_example_data_dir
-from the_next_wave.utilities import load_raw_sbg_arrays, select_sbg_burst_struct
+from . import sbgMessageParse
+from .download_example_data import get_example_data_dir
+from .utilities import load_raw_sbg_arrays, select_sbg_burst_struct
 
 try:
     import scipy.io as spio

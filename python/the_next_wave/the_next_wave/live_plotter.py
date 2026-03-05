@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import time
 from typing import Optional
 
 import numpy as np
+
+
+LIVE_PLOT_PROFILE = True
+LIVE_PLOT_PROFILE_EVERY = 1
 
 
 @dataclass
@@ -64,11 +69,44 @@ class LivePlotData:
 class LivePlotter:
     """Render live prediction, reconstruction, and actual-at-target plots."""
 
-    def __init__(self, max_points: int = 800):
+    def __init__(
+        self,
+        max_points: int = 800,
+        *,
+        logger,
+        figure_width_in: float = 16.0,
+        figure_height_in: float = 10.0,
+    ):
         # Import matplotlib lazily so the node can run headless without failing.
         import matplotlib.pyplot as plt
 
+        if logger is None:
+            raise ValueError('LivePlotter requires a logger')
+
         self.plt = plt
+        self.logger = logger
+
+        try:
+            fw = float(figure_width_in)
+        except Exception:
+            fw = 16.0
+        try:
+            fh = float(figure_height_in)
+        except Exception:
+            fh = 10.0
+        if not np.isfinite(fw) or fw <= 0.0:
+            fw = 16.0
+        if not np.isfinite(fh) or fh <= 0.0:
+            fh = 10.0
+        self.figure_width_in = fw
+        self.figure_height_in = fh
+
+        # On desktop Linux backends, repeated GUI event pumping can re-raise
+        # the figure window and steal focus. Keep window-raise disabled.
+        try:
+            self.plt.rcParams['figure.raise_window'] = False
+        except Exception:
+            pass
         self.fig = None
 
         self.ax_map = None
@@ -86,11 +124,69 @@ class LivePlotter:
 
         self.initialized = False
         self.max_points = int(max_points) if max_points and max_points > 0 else 0
-        self.pending_z_forecasts = deque(maxlen=50000)  # (target_t, pred_z, lead_s)
+        # Pending z-forecasts to be verified when actual-at-target becomes available.
+        # Use per-lead queues to avoid scanning all pending forecasts on each update.
+        # lead_bucket -> deque[(target_t, pred_z)] in non-decreasing target_t order.
+        self.pending_z_forecasts_by_lead: dict[int, deque[tuple[float, float]]] = {}
+        # Cap per-lead pending count so total pending remains bounded.
+        # (Roughly: n_leads * pending_per_lead; default keeps this in the
+        # tens-of-thousands range at most.)
+        self.pending_per_lead_maxlen = 256
         self.latest_z_error_by_lead: dict[int, float] = {}
         self.z_err_median_abs_history = deque(maxlen=10)
         self.z_err_history_by_lead: dict[int, deque[float]] = {}
         self.latched_y_limits: dict[str, tuple[float, float]] = {}
+
+        # Lightweight profiling
+        self.profile_enabled = LIVE_PLOT_PROFILE
+        try:
+            self.profile_every_n = LIVE_PLOT_PROFILE_EVERY
+        except Exception:
+            self.profile_every_n = 30
+        self.profile_i = 0
+        self.profile_ema_s: dict[str, float] = {}
+
+    def profile_update(self, stage_s: dict[str, float]) -> None:
+        """Update EMA timings and occasionally log a short breakdown."""
+        if not self.profile_enabled:
+            return
+
+        self.profile_i += 1
+        alpha = 0.12
+        for k, v in stage_s.items():
+            if not (isinstance(v, (int, float)) and np.isfinite(v) and v >= 0.0):
+                continue
+            prev = self.profile_ema_s.get(k)
+            if prev is None:
+                self.profile_ema_s[k] = float(v)
+            else:
+                self.profile_ema_s[k] = float((1.0 - alpha) * prev + alpha * v)
+
+        every = max(1, int(self.profile_every_n))
+        if (self.profile_i % every) != 0:
+            return
+
+        # Prefer EMA for stability, but also show the latest total if available.
+        ema = self.profile_ema_s
+        total_ms = 1e3 * float(ema.get('total', float('nan')))
+
+        # Keep this compact; focus on the most actionable buckets.
+        keys = (
+            'clear_axes',
+            'map',
+            'meas_recon',
+            'pred',
+            'z_err',
+            'meter',
+            'draw_idle',
+        )
+        parts = []
+        for k in keys:
+            if k in ema and np.isfinite(ema[k]):
+                parts.append(f'{k}={1e3 * float(ema[k]):.1f}ms')
+        parts.append(f'total={total_ms:.1f}ms')
+        line = '[LivePlotter profile][ema] ' + ' '.join(parts)
+        self.logger.info(line)
 
     def apply_latched_ylim(self, ax, key: str, arrays: list[np.ndarray]) -> None:
         finite_parts = []
@@ -172,8 +268,20 @@ class LivePlotter:
     def init_figure(self):
         plt = self.plt
         plt.ion()
-        self.fig = plt.figure(1)
+        self.fig = plt.figure(1, figsize=(self.figure_width_in, self.figure_height_in))
+        self.fig.set_size_inches(self.figure_width_in, self.figure_height_in, forward=True)
         self.fig.clf()
+        try:
+            self.fig.subplots_adjust(
+                left=0.10,
+                right=0.985,
+                bottom=0.06,
+                top=0.965,
+                wspace=0.30,
+                hspace=0.33,
+            )
+        except Exception:
+            pass
 
         # Match the example.py layout as closely as practical.
         self.ax_map = self.fig.add_axes([0.56, 0.64, 0.40, 0.30])
@@ -195,8 +303,19 @@ class LivePlotter:
         self.initialized = True
 
     def update(self, d: LivePlotData) -> None:
+        prof: dict[str, float] | None = None
+        if self.profile_enabled:
+            prof = {}
+            t0 = time.perf_counter()
+            t_last = t0
+
         if not self.initialized:
             self.init_figure()
+
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['init_figure'] = t_now - t_last
+            t_last = t_now
 
         # Local import to avoid matplotlib dependency at module import time.
         from matplotlib.patches import Wedge
@@ -218,6 +337,11 @@ class LivePlotter:
         )
         for ax in axes:
             ax.cla()
+
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['clear_axes'] = t_now - t_last
+            t_last = t_now
 
         # --- Map ---
         ax = self.ax_map
@@ -309,6 +433,11 @@ class LivePlotter:
         ax.grid(True)
         ax.set_aspect('equal', adjustable='box')
 
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['map'] = t_now - t_last
+            t_last = t_now
+
         # --- Measurements + recon ---
         t_meas = np.asarray(d.t_meas, dtype=float)
         if t_meas.ndim == 2 and t_meas.shape[1] > 0:
@@ -354,6 +483,11 @@ class LivePlotter:
         self.ax_v_rec.set_ylabel('v recon [m/s]')
         self.ax_v_rec.set_xlabel('t [s]')
         self.apply_latched_ylim(self.ax_v_rec, 'v_recon', [v_recon])
+
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['meas_recon'] = t_now - t_last
+            t_last = t_now
 
         # --- Predictions (target) ---
         t_pred = self.decimate_1d(np.asarray(d.t_pred, dtype=float).ravel())
@@ -457,6 +591,11 @@ class LivePlotter:
         )
         self.ax_v_pred.set_xlabel('t [s]')
 
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['pred'] = t_now - t_last
+            t_last = t_now
+
         # --- Z-only forecast verification panel (actual - forecast) ---
         axe = self.ax_z_err
         axe.set_ylabel('z err [m]')
@@ -468,20 +607,37 @@ class LivePlotter:
             issue_t = float(d.window_end_time)
             z_pred_full = np.asarray(d.z_pred, dtype=float).ravel()
             n_pred = min(t_pred.size, z_pred_full.size)
+            # Many t_pred samples map to the same integer lead bucket.
+            # We only need one forecast per lead bucket per issue time, so collapse
+            # duplicates to avoid explosive queue growth.
+            latest_by_lead: dict[int, tuple[float, float]] = {}
             for i in range(n_pred):
                 target_t = float(t_pred[i])
                 pred_z = float(z_pred_full[i])
-                if np.isfinite(target_t) and np.isfinite(pred_z):
-                    lead_s = target_t - issue_t
-                    if np.isfinite(lead_s) and lead_s >= 0.0:
-                        self.pending_z_forecasts.append((target_t, pred_z, lead_s))
+                if not (np.isfinite(target_t) and np.isfinite(pred_z)):
+                    continue
+
+                lead_s = target_t - issue_t
+                if not (np.isfinite(lead_s) and lead_s >= 0.0):
+                    continue
+
+                lead_bucket = int(np.round(lead_s))
+                # Keep the last seen sample for that bucket.
+                latest_by_lead[lead_bucket] = (target_t, pred_z)
+
+            for lead_bucket, (target_t, pred_z) in latest_by_lead.items():
+                q = self.pending_z_forecasts_by_lead.get(int(lead_bucket))
+                if q is None:
+                    q = deque(maxlen=int(self.pending_per_lead_maxlen))
+                    self.pending_z_forecasts_by_lead[int(lead_bucket)] = q
+                q.append((float(target_t), float(pred_z)))
 
         z_wh_full = np.asarray(d.z_wec_hist, dtype=float).ravel()
         valid_hist = np.isfinite(t_wec_hist_full) & np.isfinite(z_wh_full)
         t_hist = t_wec_hist_full[valid_hist]
         z_hist = z_wh_full[valid_hist]
 
-        if t_hist.size >= 2 and self.pending_z_forecasts:
+        if t_hist.size >= 2 and self.pending_z_forecasts_by_lead:
             order = np.argsort(t_hist)
             t_hist = t_hist[order]
             z_hist = z_hist[order]
@@ -492,31 +648,46 @@ class LivePlotter:
 
             if t_hist.size >= 2:
                 latest_actual_t = float(t_hist[-1])
-                still_pending = deque(maxlen=self.pending_z_forecasts.maxlen)
+                hist_t0 = float(t_hist[0])
                 resolved_count = 0
-                for target_t, pred_z, lead_s in self.pending_z_forecasts:
-                    if target_t > latest_actual_t:
-                        still_pending.append((target_t, pred_z, lead_s))
-                        continue
-                    if target_t < t_hist[0]:
+
+                # Resolve forecasts bucket-by-bucket (cheap), popping only those
+                # whose target time is now covered by actual history.
+                empty_leads: list[int] = []
+                for lead_bucket, q in list(self.pending_z_forecasts_by_lead.items()):
+                    if not q:
+                        empty_leads.append(int(lead_bucket))
                         continue
 
-                    actual_z = float(np.interp(target_t, t_hist, z_hist))
-                    if np.isfinite(actual_z):
-                        lead_bucket = int(np.round(lead_s))
-                        err = actual_z - pred_z
-                        self.latest_z_error_by_lead[lead_bucket] = err
-                        if lead_bucket not in self.z_err_history_by_lead:
-                            self.z_err_history_by_lead[lead_bucket] = deque(maxlen=10)
-                        self.z_err_history_by_lead[lead_bucket].append(float(err))
+                    # Drop anything older than our available history.
+                    while q and q[0][0] < hist_t0:
+                        q.popleft()
+
+                    while q and q[0][0] <= latest_actual_t:
+                        target_t, pred_z = q.popleft()
+                        actual_z = float(np.interp(float(target_t), t_hist, z_hist))
+                        if not np.isfinite(actual_z):
+                            continue
+
+                        err = float(actual_z - float(pred_z))
+                        self.latest_z_error_by_lead[int(lead_bucket)] = err
+                        if int(lead_bucket) not in self.z_err_history_by_lead:
+                            self.z_err_history_by_lead[int(lead_bucket)] = deque(maxlen=10)
+                        self.z_err_history_by_lead[int(lead_bucket)].append(err)
                         resolved_count += 1
-                self.pending_z_forecasts = still_pending
+
+                    if not q:
+                        empty_leads.append(int(lead_bucket))
+
+                for lead_bucket in empty_leads:
+                    try:
+                        if not self.pending_z_forecasts_by_lead.get(int(lead_bucket)):
+                            self.pending_z_forecasts_by_lead.pop(int(lead_bucket), None)
+                    except Exception:
+                        pass
 
                 if resolved_count > 0 and self.latest_z_error_by_lead:
-                    lead_vals = np.asarray(
-                        list(self.latest_z_error_by_lead.values()),
-                        dtype=float,
-                    )
+                    lead_vals = np.asarray(list(self.latest_z_error_by_lead.values()), dtype=float)
                     lead_vals = lead_vals[np.isfinite(lead_vals)]
                     if lead_vals.size > 0:
                         self.z_err_median_abs_history.append(float(np.median(np.abs(lead_vals))))
@@ -578,6 +749,11 @@ class LivePlotter:
                     err_arrays.append(np.asarray(list(hist), dtype=float))
         self.apply_latched_ylim(axe, 'z_err', err_arrays)
 
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['z_err'] = t_now - t_last
+            t_last = t_now
+
         # --- Narrow magnitude meter for median absolute z-error ---
         axm = self.ax_z_err_meter
         axm.set_ylim(0.0, 3.0)
@@ -619,6 +795,17 @@ class LivePlotter:
                 fontsize=8,
             )
 
-        # Keep GUI responsive.
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['meter'] = t_now - t_last
+            t_last = t_now
+
+        # Schedule a redraw; GUI event pumping in the node loop performs it.
         self.fig.canvas.draw_idle()
         # GUI event pumping is handled by the node's main-thread loop.
+
+        if prof is not None:
+            t_now = time.perf_counter()
+            prof['draw_idle'] = t_now - t_last
+            prof['total'] = t_now - t0
+            self.profile_update(prof)

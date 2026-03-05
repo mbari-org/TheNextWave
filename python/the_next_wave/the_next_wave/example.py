@@ -30,6 +30,18 @@ def parse_args():
     p.add_argument('--fps', type=float, default=10.0, help='Movie frames per second.')
     p.add_argument('--dpi', type=int, default=150, help='Output DPI for the movie frames.')
     p.add_argument(
+        '--fig-width',
+        type=float,
+        default=12.0,
+        help='Figure width in inches (used for both live window and movie frame size).',
+    )
+    p.add_argument(
+        '--fig-height',
+        type=float,
+        default=12.0,
+        help='Figure height in inches (used for both live window and movie frame size).',
+    )
+    p.add_argument(
         '--show',
         action='store_true',
         help='Show the interactive window even if --movie is set.',
@@ -39,11 +51,14 @@ def parse_args():
 
 A0 = None
 all_preds = Prediction()
+max_iter = 5
 
 
 def main():
     global A0
     global all_preds
+    global max_iter
+
     args = parse_args()
 
     # match MATLAB example
@@ -121,11 +136,90 @@ def main():
     else:
         plt.ion()
 
-    fig = plt.figure(1)
+    fig_width = float(args.fig_width)
+    fig_height = float(args.fig_height)
+    if not np.isfinite(fig_width) or fig_width <= 0.0:
+        fig_width = 16.0
+    if not np.isfinite(fig_height) or fig_height <= 0.0:
+        fig_height = 10.0
+
+    fig = plt.figure(1, figsize=(fig_width, fig_height))
+    fig.set_size_inches(fig_width, fig_height, forward=True)
+    fig.clf()
     try:
-        fig.set_constrained_layout(True)
+        fig.set_constrained_layout(False)
     except Exception:
         pass
+
+    # Build fixed axes once so panel positions/sizes stay stable across frames.
+    gs = fig.add_gridspec(
+        nrows=6,
+        ncols=2,
+        left=0.10,
+        right=0.985,
+        bottom=0.07,
+        top=0.965,
+        wspace=0.30,
+        hspace=0.33,
+    )
+
+    ax_z_in = fig.add_subplot(gs[0, 0])
+    ax_u_in = fig.add_subplot(gs[1, 0], sharex=ax_z_in)
+    ax_v_in = fig.add_subplot(gs[2, 0], sharex=ax_z_in)
+    ax_z_rc = fig.add_subplot(gs[3, 0], sharex=ax_z_in)
+    ax_u_rc = fig.add_subplot(gs[4, 0], sharex=ax_z_in)
+    ax_v_rc = fig.add_subplot(gs[5, 0], sharex=ax_z_in)
+
+    ax_map = fig.add_subplot(gs[0:3, 1])
+    ax_z_pr = fig.add_subplot(gs[3, 1])
+    ax_u_pr = fig.add_subplot(gs[4, 1], sharex=ax_z_pr)
+    ax_v_pr = fig.add_subplot(gs[5, 1], sharex=ax_z_pr)
+
+    axes_all = (
+        ax_map,
+        ax_z_in,
+        ax_u_in,
+        ax_v_in,
+        ax_z_rc,
+        ax_u_rc,
+        ax_v_rc,
+        ax_z_pr,
+        ax_u_pr,
+        ax_v_pr,
+    )
+
+    pred_latched_y_limits: dict[str, tuple[float, float]] = {}
+
+    def apply_latched_ylim(ax, key: str, values) -> None:
+        arr = np.asarray(values, dtype=float).ravel()
+        arr = arr[np.isfinite(arr)]
+
+        if arr.size == 0:
+            prev = pred_latched_y_limits.get(key)
+            if prev is not None:
+                ax.set_ylim(*prev)
+            return
+
+        vmin = float(np.min(arr))
+        vmax = float(np.max(arr))
+        if np.isclose(vmin, vmax):
+            pad = max(0.25, abs(vmin) * 0.1)
+            cur_lo = vmin - pad
+            cur_hi = vmax + pad
+        else:
+            span = vmax - vmin
+            pad = max(0.05 * span, 0.05)
+            cur_lo = vmin - pad
+            cur_hi = vmax + pad
+
+        prev = pred_latched_y_limits.get(key)
+        if prev is None:
+            latched = (cur_lo, cur_hi)
+        else:
+            latched = (min(prev[0], cur_lo), max(prev[1], cur_hi))
+
+        pred_latched_y_limits[key] = latched
+        ax.set_ylim(*latched)
 
     writer = None
     movie_path = None
@@ -142,6 +236,7 @@ def main():
     def run_loop(grab_frame=False):
         global A0
         global all_preds
+        global max_iter
 
         for ti in range(0, n, step):
             inputwindow = ti + np.arange(win_len)
@@ -184,6 +279,7 @@ def main():
                 ypred.reshape((-1, 1)),
                 ws,
                 A0=A0,
+                max_iter=max_iter,
             )
             A0 = params.A
 
@@ -216,22 +312,8 @@ def main():
                 comp_time=float(comp_time),
             )
 
-            fig.clf()
-
-            # Single consistent layout (avoid overlapping subplot grids).
-            gs = fig.add_gridspec(nrows=6, ncols=2)
-
-            ax_z_in = fig.add_subplot(gs[0, 0])
-            ax_u_in = fig.add_subplot(gs[1, 0], sharex=ax_z_in)
-            ax_v_in = fig.add_subplot(gs[2, 0], sharex=ax_z_in)
-            ax_z_rc = fig.add_subplot(gs[3, 0], sharex=ax_z_in)
-            ax_u_rc = fig.add_subplot(gs[4, 0], sharex=ax_z_in)
-            ax_v_rc = fig.add_subplot(gs[5, 0], sharex=ax_z_in)
-
-            ax_map = fig.add_subplot(gs[0:3, 1])
-            ax_z_pr = fig.add_subplot(gs[3, 1])
-            ax_u_pr = fig.add_subplot(gs[4, 1], sharex=ax_z_pr)
-            ax_v_pr = fig.add_subplot(gs[5, 1], sharex=ax_z_pr)
+            for ax in axes_all:
+                ax.cla()
 
             # Map: plot buoy tracks + a representative per-buoy position marker.
             colors = (
@@ -387,32 +469,41 @@ def main():
 
             ax_z_in.plot(tin[inputwindow, :], zin[inputwindow, :])
             ax_z_in.set_ylabel('z in [m]')
+            apply_latched_ylim(ax_z_in, 'z_in', zin)
 
             ax_u_in.plot(tin[inputwindow, :], uin[inputwindow, :])
             ax_u_in.set_ylabel('u in [m/s]')
+            apply_latched_ylim(ax_u_in, 'u_in', uin)
 
             ax_v_in.plot(tin[inputwindow, :], vin[inputwindow, :])
             ax_v_in.set_ylabel('v in [m/s]')
+            apply_latched_ylim(ax_v_in, 'v_in', vin)
 
             ax_z_rc.plot(tin[inputwindow, :], zr)
             ax_z_rc.set_ylabel('z recon [m]')
+            apply_latched_ylim(ax_z_rc, 'z_recon', zr)
 
             ax_u_rc.plot(tin[inputwindow, :], ur)
             ax_u_rc.set_ylabel('u recon [m/s]')
+            apply_latched_ylim(ax_u_rc, 'u_recon', ur)
 
             ax_v_rc.plot(tin[inputwindow, :], vr)
             ax_v_rc.set_ylabel('v recon [m/s]')
             ax_v_rc.set_xlabel('t [s]')
+            apply_latched_ylim(ax_v_rc, 'v_recon', vr)
 
             ax_z_pr.plot(tpred, zout, 'k')
             ax_z_pr.set_ylabel('z pred [m]')
+            apply_latched_ylim(ax_z_pr, 'z_pred', zout)
 
             ax_u_pr.plot(tpred, uout, 'k')
             ax_u_pr.set_ylabel('u pred [m/s]')
+            apply_latched_ylim(ax_u_pr, 'u_pred', uout)
 
             ax_v_pr.plot(tpred, vout, 'k')
             ax_v_pr.set_ylabel('v pred [m/s]')
             ax_v_pr.set_xlabel('t [s]')
+            apply_latched_ylim(ax_v_pr, 'v_pred', vout)
 
             if grab_frame:
                 writer.grab_frame()

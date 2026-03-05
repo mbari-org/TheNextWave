@@ -5,6 +5,13 @@ ROS 2 node wrapper for TheNextWave near-realtime predictions.
 
 All ROS 2 concerns live here (subscriptions, publishers, message packaging).
 The core algorithmic pipeline is implemented in `the_next_wave.the_next_wave.TheNextWave`.
+
+TODO:
+
+- Add an optional latent-noise mode that applies per-buoy, slowly varying
+    amplitude scaling on z crests/troughs (and consistent u/v perturbations)
+    to better emulate realistic reconstruction difficulty than additive noise.
+
 """
 
 from collections import deque, OrderedDict
@@ -13,8 +20,6 @@ import threading
 import time
 import traceback
 
-import utm
-
 from builtin_interfaces.msg import Time as TimeMsg
 from buoy_api.interface import Interface
 from buoy_interfaces.msg import WavePredictionOutput, WavePredictionPoint
@@ -22,19 +27,20 @@ from buoy_interfaces.msg import XBRecord
 import numpy as np
 import rclpy
 from std_msgs.msg import Header
-from the_next_wave import TheNextWave, TheNextWaveConfig
-from the_next_wave.sbg_bridge_service import SbgBridgeService
-from the_next_wave.swift import SBGData, SWIFTArray
-from the_next_wave.utilities import (
+from . import TheNextWave, TheNextWaveConfig
+from .sbg_bridge_service import SbgBridgeService
+from .swift import SBGData, SWIFTArray
+from .utilities import (
     bulk_wave_params_from_wavespec,
     generic_coordinate_transform_inverse,
 )
+import utm
 
 
 @dataclass
 class TheNextWaveNodeParams:
     window_duration_sec: float = 256.0
-    processing_interval_sec: float = 0.85
+    processing_interval_sec: float = 0.5
     expected_fs: float = 5.0
     # Rotation applied in the lat/lon <-> local x/y projection (clockwise-positive).
     # For sim / incident-wave latent inputs, x/y and u/v are already world ENU
@@ -191,13 +197,13 @@ class TheNextWaveNode(Interface):
 
         self.set_params()
 
-        self._profiling_iter = 0
+        self.profiling_iter = 0
 
         # RNG for sim latent noise floor (used only in latent_callback).
         try:
-            self._latent_rng = np.random.default_rng(int(self.params.latent_noise_seed))
+            self.latent_rng = np.random.default_rng(int(self.params.latent_noise_seed))
         except Exception:
-            self._latent_rng = np.random.default_rng(0)
+            self.latent_rng = np.random.default_rng(0)
 
         # WEC "actual" sample (packaged into WavePredictionOutput for external tools)
         self.wec_actual_latest = None  # dict with keys: t_s, z, u, v
@@ -449,12 +455,12 @@ class TheNextWaveNode(Interface):
             self.publish_prediction(results)
             t_publish_end = time.perf_counter()
 
-            self._profiling_iter += 1
+            self.profiling_iter += 1
             if self.params.profiling_enable:
                 log_every_n = int(self.params.profiling_log_every_n)
                 if log_every_n <= 0:
                     log_every_n = 1
-                if (self._profiling_iter % log_every_n) == 0:
+                if (self.profiling_iter % log_every_n) == 0:
                     total_s = time.perf_counter() - t_total_start
                     snapshot_s = t_snapshot_end - t_snapshot_start
                     example_frame_s = t_example_frame_end - t_example_frame_start
@@ -811,12 +817,12 @@ class TheNextWaveNode(Interface):
                 # wave inputs that can make MEM directional estimation singular.
                 std_z = float(self.params.latent_noise_std_z_m)
                 std_uv = float(self.params.latent_noise_std_uv_mps)
-                if (std_z > 0.0 or std_uv > 0.0) and self._latent_rng is not None:
+                if (std_z > 0.0 or std_uv > 0.0) and self.latent_rng is not None:
                     if std_z > 0.0:
-                        z = z + float(self._latent_rng.normal(0.0, std_z))
+                        z = z + float(self.latent_rng.normal(0.0, std_z))
                     if std_uv > 0.0:
-                        u = u + float(self._latent_rng.normal(0.0, std_uv))
-                        v = v + float(self._latent_rng.normal(0.0, std_uv))
+                        u = u + float(self.latent_rng.normal(0.0, std_uv))
+                        v = v + float(self.latent_rng.normal(0.0, std_uv))
 
                 self.ingest_swift_sample_locked(
                     swift_num=swift_num,
@@ -891,7 +897,7 @@ class TheNextWaveNode(Interface):
         # This lets the processing loop convert to local x/y via subtraction from
         # the current origin UTM coordinate + rotation, without per-sample projection.
         try:
-            e, n, _zone_num, _zone_let = utm.from_latlon(float(lat), float(lon))
+            e, n, zone_num_unused, zone_let_unused = utm.from_latlon(float(lat), float(lon))
             getattr(sbg.GpsPos, 'easting').append(float(e))
             getattr(sbg.GpsPos, 'northing').append(float(n))
         except Exception:
@@ -1011,6 +1017,9 @@ class TheNextWaveNode(Interface):
         params = self.params
         defaults = TheNextWaveNodeParams()
 
+        # Processing cadence for wave prediction callback loop.
+        self.declare_parameter('processing_interval_sec', defaults.processing_interval_sec)
+
         # Optional: downsample incoming latent data to mimic field SBG rate.
         # Set to 0.0 to disable (use all incoming samples).
         self.declare_parameter('downsample_to_hz', defaults.downsample_to_hz)
@@ -1112,6 +1121,9 @@ class TheNextWaveNode(Interface):
         params.example_rotation_deg = float(self.get_parameter('example_rotation_deg').value)
         params.example_xtarget = float(self.get_parameter('example_xtarget').value)
         params.example_ytarget = float(self.get_parameter('example_ytarget').value)
+        params.processing_interval_sec = float(
+            self.get_parameter('processing_interval_sec').value
+        )
         params.downsample_to_hz = float(self.get_parameter('downsample_to_hz').value)
 
         params.rotation_deg = float(self.get_parameter('rotation_deg').value)

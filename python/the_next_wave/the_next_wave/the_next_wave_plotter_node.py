@@ -18,8 +18,9 @@ from buoy_interfaces.msg import WavePredictionOutput
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from the_next_wave.live_plotter import LivePlotData, LivePlotter
+from .live_plotter import LivePlotData, LivePlotter
 
 
 def reshape_f(vec: list[float], n_samples: int, n_buoys: int) -> np.ndarray:
@@ -40,16 +41,29 @@ class TheNextWavePlotterNode(Node):
         self.declare_parameter('prediction_topic', 'wave_predictions')
         self.declare_parameter('max_points', 600)
         self.declare_parameter('history_sec', 100.0)
+        self.declare_parameter('figure_width_in', 16.0)
+        self.declare_parameter('figure_height_in', 10.0)
 
         prediction_topic = str(self.get_parameter('prediction_topic').value)
         max_points = int(self.get_parameter('max_points').value)
         history_sec = float(self.get_parameter('history_sec').value)
+        figure_width_in = float(self.get_parameter('figure_width_in').value)
+        figure_height_in = float(self.get_parameter('figure_height_in').value)
         if max_points < 50:
             max_points = 50
         if not np.isfinite(history_sec) or history_sec <= 0.0:
             history_sec = 600.0
+        if not np.isfinite(figure_width_in) or figure_width_in <= 0.0:
+            figure_width_in = 16.0
+        if not np.isfinite(figure_height_in) or figure_height_in <= 0.0:
+            figure_height_in = 10.0
 
-        self.plotter = LivePlotter(max_points=max_points)
+        self.plotter = LivePlotter(
+            max_points=max_points,
+            logger=self.get_logger(),
+            figure_width_in=figure_width_in,
+            figure_height_in=figure_height_in,
+        )
         self.history_sec = history_sec
 
         self.lock = threading.Lock()
@@ -64,7 +78,11 @@ class TheNextWavePlotterNode(Node):
             WavePredictionOutput,
             prediction_topic,
             self.on_msg,
-            10,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+            ),
         )
 
         self.get_logger().info(f'Plotter subscribing to: {prediction_topic}')
@@ -77,10 +95,10 @@ class TheNextWavePlotterNode(Node):
     def is_window_open(self) -> bool:
         return self.plotter.is_window_open()
 
-    def plot_once(self) -> None:
+    def plot_once(self) -> bool:
         with self.lock:
             if not self.dirty or self.latest is None:
-                return
+                return False
             msg = self.latest
             self.dirty = False
 
@@ -236,6 +254,9 @@ class TheNextWavePlotterNode(Node):
             self.plotter.update(d)
         except Exception as e:
             self.get_logger().warn(f'Plot update failed: {e}')
+            return False
+
+        return True
 
 
 def main(args=None) -> None:
@@ -249,11 +270,16 @@ def main(args=None) -> None:
         import matplotlib.pyplot as plt
 
         while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.1)
-            node.plot_once()
+            # Non-blocking spin; pacing comes from short GUI pauses below.
+            rclpy.spin_once(node, timeout_sec=0.0)
+            plotted = node.plot_once()
 
-            # Keep GUI responsive.
-            plt.pause(0.05)
+            # Keep GUI responsive with low latency.
+            # figure.raise_window=False in LivePlotter prevents focus stealing.
+            if plotted:
+                plt.pause(0.001)
+            else:
+                plt.pause(0.005)
 
             if not node.is_window_open():
                 break

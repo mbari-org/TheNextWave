@@ -8,8 +8,8 @@ from typing import Callable
 
 import rclpy
 
-from the_next_wave import sbgMessageParse
-from the_next_wave.readAndDecodeFromEthernetBridge import iter_sbg_headers
+from . import sbgMessageParse
+from .readAndDecodeFromEthernetBridge import iter_sbg_headers
 
 
 class SbgBridgeService:

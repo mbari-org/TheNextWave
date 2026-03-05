@@ -24,31 +24,35 @@ Reusable functions extracted from example.py for use in the_next_wave_node.py an
 import numpy as np
 import utm
 
+from .swift import WaveSpec
+from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
+
 try:
     from pyproj import CRS, Transformer
 
-    _HAS_PYPROJ = True
+    HAS_PYPROJ = True
 except Exception:  # pragma: no cover
     CRS = None
     Transformer = None
-    _HAS_PYPROJ = False
+    HAS_PYPROJ = False
 
-_UTM_TRANSFORMER_CACHE: dict[tuple[int, bool], tuple[object, object]] = {}
+UTM_TRANSFORMER_CACHE: dict[tuple[int, bool], tuple[object, object]] = {}
 
 
-def _get_pyproj_utm_transformers(zone_num: int, northern: bool):
-    """Return (fwd, inv) pyproj Transformers for WGS84<->UTM zone.
+def get_pyproj_utm_transformers(zone_num: int, northern: bool):
+    """
+    Return (fwd, inv) pyproj Transformers for WGS84<->UTM zone.
 
     Uses EPSG:
       - 326xx for northern hemisphere
       - 327xx for southern hemisphere
     """
     key = (int(zone_num), bool(northern))
-    cached = _UTM_TRANSFORMER_CACHE.get(key)
+    cached = UTM_TRANSFORMER_CACHE.get(key)
     if cached is not None:
         return cached
 
-    if not _HAS_PYPROJ:
+    if not HAS_PYPROJ:
         raise RuntimeError('pyproj not available')
 
     crs_ll = CRS.from_epsg(4326)
@@ -56,12 +60,8 @@ def _get_pyproj_utm_transformers(zone_num: int, northern: bool):
     crs_utm = CRS.from_epsg(epsg)
     fwd = Transformer.from_crs(crs_ll, crs_utm, always_xy=True)
     inv = Transformer.from_crs(crs_utm, crs_ll, always_xy=True)
-    _UTM_TRANSFORMER_CACHE[key] = (fwd, inv)
+    UTM_TRANSFORMER_CACHE[key] = (fwd, inv)
     return fwd, inv
-
-
-from .swift import WaveSpec
-from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
 
 
 def as_1d(a) -> np.ndarray:
@@ -183,10 +183,10 @@ def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
     # Python loop over utm.from_latlon). Fall back to utm if pyproj unavailable.
     e = np.empty_like(lat, dtype=float)
     n = np.empty_like(lat, dtype=float)
-    if _HAS_PYPROJ:
+    if HAS_PYPROJ:
         try:
             northern = bool(float(lat0) >= 0.0)
-            fwd, _inv = _get_pyproj_utm_transformers(int(zone_num), northern)
+            fwd, inv_unused = get_pyproj_utm_transformers(int(zone_num), northern)
             lon_flat = np.asarray(lon, dtype=float).reshape((-1,))
             lat_flat = np.asarray(lat, dtype=float).reshape((-1,))
             e_flat, n_flat = fwd.transform(lon_flat, lat_flat)
@@ -194,12 +194,16 @@ def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
             n[:] = np.asarray(n_flat, dtype=float).reshape(lat.shape)
         except Exception:
             for i in range(lat.size):
-                ei, ni, _zn, _zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
+                ei, ni, zn_unused, zl_unused = utm.from_latlon(
+                    float(lat.flat[i]), float(lon.flat[i])
+                )
                 e.flat[i] = ei
                 n.flat[i] = ni
     else:
         for i in range(lat.size):
-            ei, ni, _zn, _zl = utm.from_latlon(float(lat.flat[i]), float(lon.flat[i]))
+            ei, ni, zn_unused, zl_unused = utm.from_latlon(
+                float(lat.flat[i]), float(lon.flat[i])
+            )
             e.flat[i] = ei
             n.flat[i] = ni
 
@@ -253,10 +257,10 @@ def generic_coordinate_transform_inverse(x, y, lat0, lon0, rotation_deg):
 
     lat = np.empty_like(x, dtype=float)
     lon = np.empty_like(x, dtype=float)
-    if _HAS_PYPROJ:
+    if HAS_PYPROJ:
         try:
             northern = bool(float(lat0) >= 0.0)
-            _fwd, inv = _get_pyproj_utm_transformers(int(zone_num), northern)
+            fwd_unused, inv = get_pyproj_utm_transformers(int(zone_num), northern)
             e_flat = np.asarray(e, dtype=float).reshape((-1,))
             n_flat = np.asarray(n, dtype=float).reshape((-1,))
             lon_flat, lat_flat = inv.transform(e_flat, n_flat)
@@ -322,7 +326,7 @@ def build_wavespec_from_swifts(
     f0 = None
 
     for sw in swifts:
-        Etheta, theta, E, f, _, spread, spread2, _ = SWIFTdirectionalspectra(
+        Etheta, theta, E, f, unused_1, spread, spread2, unused_2 = SWIFTdirectionalspectra(
             sw,
             plotflag=False,
             recip=recip,
@@ -397,7 +401,7 @@ def centroid_period_and_phase_speed(ws):
     return float(Te), float(ce)
 
 
-def _wrap_360(deg: float) -> float:
+def wrap_360(deg: float) -> float:
     if not np.isfinite(deg):
         return float('nan')
     out = float(deg) % 360.0
@@ -406,7 +410,7 @@ def _wrap_360(deg: float) -> float:
     return out
 
 
-def _deg_to_compass_16(deg: float) -> str:
+def deg_to_compass_16(deg: float) -> str:
     if not np.isfinite(deg):
         return 'nan'
     labels = [
@@ -427,7 +431,7 @@ def _deg_to_compass_16(deg: float) -> str:
         'NW',
         'NNW',
     ]
-    idx = int(np.floor((_wrap_360(deg) + 11.25) / 22.5)) % 16
+    idx = int(np.floor((wrap_360(deg) + 11.25) / 22.5)) % 16
     return labels[idx]
 
 
@@ -541,7 +545,7 @@ def bulk_dir_params_from_Etheta(
         mean_e = float(np.nansum(w_peak * east) / denom_peak)
         mean_n = float(np.nansum(w_peak * north) / denom_peak)
         # Heading in compass degrees: atan2(east, north)
-        Dp = _wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
+        Dp = wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
         R = float(np.hypot(mean_e, mean_n))
         spreadp = float(np.rad2deg(np.sqrt(max(0.0, 2.0 * (1.0 - R)))))
 
@@ -556,7 +560,7 @@ def bulk_dir_params_from_Etheta(
     else:
         mean_e = float(np.nansum(w_all * east.reshape((1, -1))) / denom_all)
         mean_n = float(np.nansum(w_all * north.reshape((1, -1))) / denom_all)
-        Dm = _wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
+        Dm = wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
 
     return {'Dp_deg': float(Dp), 'Dm_deg': float(Dm), 'spreadp_deg': float(spreadp)}
 
@@ -604,12 +608,12 @@ def format_bulk_wave_params(params: dict, label: str = '') -> str:
     ]
 
     if np.isfinite(Dp):
-        parts.append(f'Dp={Dp:.1f}° ({_deg_to_compass_16(Dp)})')
+        parts.append(f'Dp={Dp:.1f}° ({deg_to_compass_16(Dp)})')
     else:
         parts.append('Dp=nan')
 
     if np.isfinite(Dm):
-        parts.append(f'Dm={Dm:.1f}° ({_deg_to_compass_16(Dm)})')
+        parts.append(f'Dm={Dm:.1f}° ({deg_to_compass_16(Dm)})')
     else:
         parts.append('Dm=nan')
 
@@ -765,7 +769,9 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
 
         if east is not None and north is not None:
             # Convert absolute UTM -> local x/y in meters relative to origin.
-            e0, n0, _zone_num, _zone_let = utm.from_latlon(float(latorigin), float(lonorigin))
+            e0, n0, zone_num_unused, zone_let_unused = utm.from_latlon(
+                float(latorigin), float(lonorigin)
+            )
             dx = np.asarray(east, dtype=float) - float(e0)
             dy = np.asarray(north, dtype=float) - float(n0)
             ang = np.deg2rad(rotation)

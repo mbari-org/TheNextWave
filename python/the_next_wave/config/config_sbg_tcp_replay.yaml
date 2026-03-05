@@ -10,23 +10,24 @@
 
 /the_next_wave_node:
   ros__parameters:
+    processing_interval_sec: 0.5
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
     # Keep x/y in East/North so u/v (vel_e/vel_n) stay consistent.
     rotation_deg: 0.0
-    downsample_to_hz: 5.0
+    # downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     dense_prediction_window: 50.0
     wec_actual_history_sec: 50.0
     # If true, evaluate dense model output on WEC actual-history timestamps (sim only).
-    enable_dense_history_projection: false
+    # enable_dense_history_projection: false
 
     # Least-squares solver tuning
     lsq_ridge: 1.0e-6
-    lsq_max_iter: 60
+    lsq_max_iter: 5
     lsq_use_spectrum_weighted_ridge: true
     lsq_spectrum_ridge_floor: 1.0e-6
-    lsq_diagnostics_enable: true
+    lsq_diagnostics_enable: false
     lsq_near_bound_ratio: 0.95
 
     # Optional MEM stabilization (disabled by default; diverges from MATLAB).
@@ -50,6 +51,8 @@
     prediction_topic: wave_predictions
     max_points: 600
     history_sec: 50.0
+    figure_width_in: 16.0
+    figure_height_in: 10.0
 
 /sbg_tcp_replay_swift22:
   ros__parameters:

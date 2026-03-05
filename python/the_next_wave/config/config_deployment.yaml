@@ -10,6 +10,7 @@
 
 /the_next_wave_node:
   ros__parameters:
+    processing_interval_sec: 0.5
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
     # Keep x/y in East/North so u/v (vel_e/vel_n) stay consistent.
@@ -41,6 +42,8 @@
     prediction_topic: wave_predictions
     max_points: 600
     history_sec: 50.0
+    figure_width_in: 16.0
+    figure_height_in: 10.0
 
 /sbg_tcp_replay_swift22:
   ros__parameters:

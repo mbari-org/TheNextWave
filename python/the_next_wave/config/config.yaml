@@ -1,6 +1,7 @@
 # Config for simulation with mbari_wec (gz sim)
 /the_next_wave_node:
   ros__parameters:
+    processing_interval_sec: 0.6
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
     # Use ENU-style local frame: x=east, y=north.
@@ -11,7 +12,7 @@
     # measurement window. Set to 0 to use the full window.
     dense_prediction_window: 50.0
     # If true, evaluate dense model output on WEC actual-history timestamps (sim only).
-    enable_dense_history_projection: false
+    enable_dense_history_projection: true
     # How much high-rate WEC actual history to package in each prediction message.
     wec_actual_history_sec: 50.0
 
@@ -28,9 +29,9 @@
     mem_moment_cap: 0.999
 
     # Sim latent ingest noise floor (helps avoid MEM singularities on perfect waves).
-    latent_noise_std_z_m: 0.0  # 1.0e-6
-    latent_noise_std_uv_mps: 0.0  # 1.0e-6
-    latent_noise_seed: 0
+    latent_noise_std_z_m: 1.0e-1  # 0.0  # 1.0e-6
+    latent_noise_std_uv_mps: 1.0e-1  # 0.0  # 1.0e-6
+    latent_noise_seed: 42
 
     # For SWIFT bridge + replay only
     sbg_bridge_use_example_frame: false
@@ -51,3 +52,5 @@
     prediction_topic: wave_predictions
     max_points: 600
     history_sec: 50.0
+    figure_width_in: 16.0
+    figure_height_in: 10.0

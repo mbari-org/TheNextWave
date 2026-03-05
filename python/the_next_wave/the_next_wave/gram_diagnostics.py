@@ -39,16 +39,17 @@ class GramDiag:
     n_pairs_sampled: int
 
 
-def _as_float_array(a) -> np.ndarray:
+def as_float_array(a) -> np.ndarray:
     return np.asarray(a, dtype=float)
 
 
 def normalize_columns(P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return column-normalized matrix and column norms.
+    """
+    Return column-normalized matrix and column norms.
 
     Columns with zero norm are left unchanged and get norm=1.0.
     """
-    P = _as_float_array(P)
+    P = as_float_array(P)
     col_norm2 = np.sum(P * P, axis=0)
     col_norm = np.sqrt(col_norm2)
     col_norm[col_norm == 0.0] = 1.0
@@ -61,18 +62,20 @@ def estimate_offdiag_frobenius_norm(
     n_probes: int = 20,
     seed: int = 0,
 ) -> float:
-    """Estimate ||C - I||_F where C = Pn^T Pn using Hutchinson probes.
-
-    This avoids forming the dense n x n matrix. Each probe costs O(mn).
     """
-    Pn = _as_float_array(Pn)
+    Estimate ||C - I||_F where C = Pn^T Pn using Hutchinson probes.
+
+    This avoids forming the dense n x n matrix. Each probe does two
+    matrix-vector multiplies, so runtime scales with matrix size.
+    """
+    Pn = as_float_array(Pn)
     n = int(Pn.shape[1])
     if n <= 0:
         return 0.0
 
     rng = np.random.default_rng(int(seed))
     acc = 0.0
-    for _ in range(int(n_probes)):
+    for probe_i in range(int(n_probes)):
         v = rng.choice([-1.0, 1.0], size=n)
         y = Pn @ v
         z = Pn.T @ y
@@ -89,11 +92,12 @@ def sample_offdiag_correlations(
     n_pairs: int = 50000,
     seed: int = 0,
 ) -> np.ndarray:
-    """Sample off-diagonal entries of C = Pn^T Pn (absolute value).
+    """
+    Sample off-diagonal entries of C = Pn^T Pn (absolute value).
 
     Uses random column pairs and computes dot products directly.
     """
-    Pn = _as_float_array(Pn)
+    Pn = as_float_array(Pn)
     n = int(Pn.shape[1])
     if n < 2:
         return np.zeros((0,), dtype=float)
@@ -113,7 +117,7 @@ def sample_offdiag_correlations(
 
 def corr_subset(Pn: np.ndarray, idx: np.ndarray) -> np.ndarray:
     """Compute exact correlation submatrix for a subset of columns."""
-    Pn = _as_float_array(Pn)
+    Pn = as_float_array(Pn)
     idx = np.asarray(idx, dtype=np.int64).reshape((-1,))
     return (Pn[:, idx].T @ Pn[:, idx]).astype(float, copy=False)
 
@@ -169,7 +173,8 @@ def gram_diagnostics(
     out_dir: Optional[str] = None,
     prefix: str = 'lsq',
 ) -> GramDiag:
-    """Compute summary diagnostics and optionally write plots.
+    """
+    Compute summary diagnostics and optionally write plots.
 
     Parameters
     ----------
@@ -187,8 +192,14 @@ def gram_diagnostics(
         If provided, writes PNG plots into this directory.
     prefix : str, optional
         Prefix for output filenames.
+
+    Returns
+    -------
+    GramDiag
+        Summary diagnostics for normalized Gram-matrix structure.
+
     """
-    P = _as_float_array(P)
+    P = as_float_array(P)
     m, n = int(P.shape[0]), int(P.shape[1])
     if n == 0 or m == 0:
         return GramDiag(
@@ -200,7 +211,7 @@ def gram_diagnostics(
             n_pairs_sampled=0,
         )
 
-    Pn, _ = normalize_columns(P)
+    Pn, col_norm_unused = normalize_columns(P)
 
     offdiag_fro = estimate_offdiag_frobenius_norm(Pn, n_probes=int(n_probes), seed=int(seed))
 
