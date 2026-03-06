@@ -17,10 +17,16 @@
     wec_actual_history_sec: 50.0
 
     # Least-squares solver tuning
-    lsq_ridge: 1.0e-6
+    lsq_ridge: 1.0e-6  # Avoids coefficient explosion when the parameter-space of the solver is
+                       # very flat
     lsq_max_iter: 5  # 60
     lsq_use_spectrum_weighted_ridge: true
-    lsq_spectrum_ridge_floor: 1.0e-6
+    lsq_spectrum_ridge_floor: 1.0e-6  # Provides conditioning on spectrum with low bounds to
+                                      # prevent solver from driving coefficients overly
+                                      # large/unstable to fit noise. Effect is similar to an
+                                      # MAP (Gaussian) prior with max of upper bound or this floor
+                                      # value as the stddev. Puts the ridge scaling in the same
+                                      # units as the solved coefficients.
     lsq_diagnostics_enable: false
     lsq_near_bound_ratio: 0.95
 
@@ -29,9 +35,17 @@
     mem_moment_cap: 0.999
 
     # Sim latent ingest noise floor (helps avoid MEM singularities on perfect waves).
+    # Modes: 'none' | 'additive' | 'amplitude_scaling' | 'both'
+    latent_noise_mode: both
     latent_noise_std_z_m: 1.0e-1  # 0.0  # 1.0e-6
     latent_noise_std_uv_mps: 1.0e-1  # 0.0  # 1.0e-6
     latent_noise_seed: 42
+    # Per-buoy slowly varying multiplicative amplitude scaling (used when
+    # latent_noise_mode is 'amplitude_scaling' or 'both').
+    latent_scale_std_frac: 0.08
+    latent_scale_tau_sec: 20.0
+    latent_scale_min: 0.75
+    latent_scale_max: 1.25
 
     # For SWIFT bridge + replay only
     sbg_bridge_use_example_frame: false

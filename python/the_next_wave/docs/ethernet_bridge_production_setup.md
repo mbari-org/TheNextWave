@@ -1,8 +1,8 @@
 # Production setup: SWIFT SBG over Digi Ethernet Bridge
 
-This document is a practical checklist for getting raw SBG Ellipse data from multiple SWIFT buoys onto a PC over a Digi 900 MHz Ethernet bridge, and feeding those streams into `the_next_wave` via the built-in SBG TCP bridge server.
+This is a field checklist for getting raw SBG Ellipse data from multiple SWIFT buoys onto a PC over a Digi 900 MHz Ethernet bridge, then feeding those streams into `the_next_wave` through the built-in SBG TCP bridge server.
 
-It is intentionally **credential-free**: passwords, encryption keys, license keys, and device-specific identifiers are **not** included here. Keep those in an operational runbook / password manager, not in git.
+No credentials are included here (passwords, encryption keys, license keys, or device-specific IDs). Keep those in an operations runbook or password manager, not in git.
 
 ## System overview
 

@@ -303,7 +303,6 @@ def leastSquaresWavePropagation(
     Etheta_u_sorted = Etheta_u[:, I_sort]
 
     t_stage = prof_mark('spectrum_prep_s', t_stage)
-    t_stage = prof_mark('spectrum_prep_s', t_stage)
 
     E_for_peak = Etheta_u_sorted
     n_freq, n_dir = E_for_peak.shape
@@ -335,7 +334,6 @@ def leastSquaresWavePropagation(
     theta = np.sort(theta)  # (25,)
 
     t_stage = prof_mark('build_k_theta_s', t_stage)
-    t_stage = prof_mark('build_k_theta_s', t_stage)
 
     # Reshape, build kx, ky, omega
     # print(f'{DTp=}')
@@ -363,11 +361,11 @@ def leastSquaresWavePropagation(
 
     N_input_pts = len(z1)
     if len(x1) != N_input_pts or len(y1) != N_input_pts or len(t1) != N_input_pts:
-        print('Error: All input vectors must be equal length', flush=True)
+        raise ValueError('All input vectors must be equal length')
 
     N_output_pts = len(t2)
     if len(x2) != N_output_pts or len(y2) != N_output_pts:
-        print('Error: All output vectors must be equal length', flush=True)
+        raise ValueError('All output vectors must be equal length')
 
     # Interpolate measured spectrum to solution space.
     # This is expensive (`griddata`), so reuse cached results when possible.
@@ -466,7 +464,6 @@ def leastSquaresWavePropagation(
     phi2 = x2 @ kx.T + y2 @ ky.T - t2 @ omega.T
 
     t_stage = prof_mark('build_phi_s', t_stage)
-    t_stage = prof_mark('build_phi_s', t_stage)
 
     if use_vel:
         P1_11 = np.cos(phi1)
@@ -499,7 +496,6 @@ def leastSquaresWavePropagation(
         P2 = np.hstack([np.cos(phi2), np.sin(phi2)])
 
     t_stage = prof_mark('build_P_mats_s', t_stage)
-    t_stage = prof_mark('build_P_mats_s', t_stage)
 
     # Safety: handle any remaining exact zeros.
     zero_mask = (amps == 0)
@@ -510,7 +506,6 @@ def leastSquaresWavePropagation(
         amps = amps[keep_mask]
 
     t_stage = prof_mark('prune_zero_cols_s', t_stage)
-    t_stage = prof_mark('prune_zero_cols_s', t_stage)
 
     # RHS vector
     if use_vel:
@@ -520,7 +515,6 @@ def leastSquaresWavePropagation(
     else:
         b = np.asarray(z1).ravel(order='F')
 
-    t_stage = prof_mark('build_rhs_s', t_stage)
     t_stage = prof_mark('build_rhs_s', t_stage)
 
     # print(f'{P1.shape=}')
@@ -554,7 +548,8 @@ def leastSquaresWavePropagation(
     t = time.time() - t_0
     if prof is not None:
         prof['solve_total_s'] = float(time.perf_counter() - t_stage_solve)
-    print(f'solve time: {t:.4f} s', flush=True)
+    if diagnostics:
+        print(f'solve time: {t:.4f} s', flush=True)
     # print(f'{A.sum()=}')
 
     gram_diag = None
@@ -629,14 +624,12 @@ def leastSquaresWavePropagation(
             )
 
     t_stage = prof_mark('diagnostics_s', t_stage)
-    t_stage = prof_mark('diagnostics_s', t_stage)
 
     # reconstructed fields
     zc = P1 @ A
     z2 = P2 @ A
     # print(f'{zc=} {z2=}')
 
-    t_stage = prof_mark('recon_s', t_stage)
     t_stage = prof_mark('recon_s', t_stage)
 
     # bookkeeping into params
@@ -676,7 +669,6 @@ def leastSquaresWavePropagation(
     params.omega = np.asarray(omega, dtype=float).reshape((-1,))
     params.use_vel = use_vel
 
-    t_stage = prof_mark('params_pack_s', t_stage)
     t_stage = prof_mark('params_pack_s', t_stage)
 
     if prof is not None:

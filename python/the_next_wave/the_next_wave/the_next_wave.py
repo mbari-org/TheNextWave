@@ -143,8 +143,9 @@ class TheNextWave:
 
         Returns
         -------
-            Results dictionary containing the intermediate products (cleaned SBG,
-            spectrum, recon) and the final predictions.
+        dict
+            Results dictionary containing intermediate products (cleaned SBG,
+            wavespec, reconstruction) and final predictions.
 
         """
         results: dict[str, Any] = {'wave_stats': {}}
@@ -191,7 +192,7 @@ class TheNextWave:
         fs = float(fs)
         if not np.isfinite(fs) or fs <= 0.0:
             if self.logger is not None:
-                self.logger.warn(
+                self.logger.warning(
                     f'Invalid fs={fs}; falling back to expected_fs={self.config.expected_fs}'
                 )
             fs = float(self.config.expected_fs)
@@ -251,7 +252,7 @@ class TheNextWave:
         elif self.wavespec_is_usable(self.last_wavespec):
             wavespec = self.last_wavespec
             if self.logger is not None:
-                self.logger.warn(
+                self.logger.warning(
                     'No usable wavespec from current window; reusing last valid wavespec'
                 )
         else:

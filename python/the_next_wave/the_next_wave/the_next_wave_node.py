@@ -6,12 +6,6 @@ ROS 2 node wrapper for TheNextWave near-realtime predictions.
 All ROS 2 concerns live here (subscriptions, publishers, message packaging).
 The core algorithmic pipeline is implemented in `the_next_wave.the_next_wave.TheNextWave`.
 
-TODO:
-
-- Add an optional latent-noise mode that applies per-buoy, slowly varying
-    amplitude scaling on z crests/troughs (and consistent u/v perturbations)
-    to better emulate realistic reconstruction difficulty than additive noise.
-
 """
 
 from collections import deque, OrderedDict
@@ -27,6 +21,8 @@ from buoy_interfaces.msg import XBRecord
 import numpy as np
 import rclpy
 from std_msgs.msg import Header
+import utm
+
 from . import TheNextWave, TheNextWaveConfig
 from .sbg_bridge_service import SbgBridgeService
 from .swift import SBGData, SWIFTArray
@@ -34,7 +30,6 @@ from .utilities import (
     bulk_wave_params_from_wavespec,
     generic_coordinate_transform_inverse,
 )
-import utm
 
 
 @dataclass
@@ -83,6 +78,11 @@ class TheNextWaveNodeParams:
     latent_noise_std_z_m: float = 1e-4
     latent_noise_std_uv_mps: float = 1e-4
     latent_noise_seed: int = 0
+    latent_noise_mode: str = 'additive'
+    latent_scale_std_frac: float = 0.08
+    latent_scale_tau_sec: float = 20.0
+    latent_scale_min: float = 0.75
+    latent_scale_max: float = 1.25
 
     # Least-squares solver controls
     lsq_ridge: float = 1e-6
@@ -123,6 +123,11 @@ class TheNextWaveNodeParams:
                 f'  latent_noise_std_z_m={self.latent_noise_std_z_m},',
                 f'  latent_noise_std_uv_mps={self.latent_noise_std_uv_mps},',
                 f'  latent_noise_seed={self.latent_noise_seed},',
+                f"  latent_noise_mode='{self.latent_noise_mode}',",
+                f'  latent_scale_std_frac={self.latent_scale_std_frac},',
+                f'  latent_scale_tau_sec={self.latent_scale_tau_sec},',
+                f'  latent_scale_min={self.latent_scale_min},',
+                f'  latent_scale_max={self.latent_scale_max},',
                 f'  sbg_use_example_frame={self.sbg_use_example_frame},',
                 f'  example_latorigin={self.example_latorigin},',
                 f'  example_lonorigin={self.example_lonorigin},',
@@ -130,17 +135,17 @@ class TheNextWaveNodeParams:
                 f'  example_xtarget={self.example_xtarget},',
                 f'  example_ytarget={self.example_ytarget},',
                 f'  swift_idx={swift_idx_str},',
-                f'  sbg_bridge_port_by_swift={port_map_str}',
+                f'  sbg_bridge_port_by_swift={port_map_str},',
                 f'  lsq_ridge={self.lsq_ridge},',
                 f'  lsq_max_iter={self.lsq_max_iter},',
                 f'  lsq_use_spectrum_weighted_ridge={self.lsq_use_spectrum_weighted_ridge},',
                 f'  lsq_spectrum_ridge_floor={self.lsq_spectrum_ridge_floor},',
                 f'  lsq_diagnostics_enable={self.lsq_diagnostics_enable},',
                 f'  lsq_near_bound_ratio={self.lsq_near_bound_ratio},',
-                f'  mem_moment_cap_enable={self.mem_moment_cap_enable},'
-                f'  mem_moment_cap={self.mem_moment_cap},'
-                f'  profiling_enable={self.profiling_enable},'
-                f'  profiling_log_every_n={self.profiling_log_every_n},'
+                f'  mem_moment_cap_enable={self.mem_moment_cap_enable},',
+                f'  mem_moment_cap={self.mem_moment_cap},',
+                f'  profiling_enable={self.profiling_enable},',
+                f'  profiling_log_every_n={self.profiling_log_every_n},',
                 ')',
             ]
         )
@@ -204,6 +209,7 @@ class TheNextWaveNode(Interface):
             self.latent_rng = np.random.default_rng(int(self.params.latent_noise_seed))
         except Exception:
             self.latent_rng = np.random.default_rng(0)
+        self.latent_scale_state_by_swift: dict[int, tuple[float, float]] = {}
 
         # WEC "actual" sample (packaged into WavePredictionOutput for external tools)
         self.wec_actual_latest = None  # dict with keys: t_s, z, u, v
@@ -486,7 +492,7 @@ class TheNextWaveNode(Interface):
                         f'core_total={1e3 * core_total_s:.1f}'
                     )
 
-            print(
+            self.get_logger().info(
                 f'Wave processing complete in {(time.perf_counter() - t_total_start):.3f} s'
             )
 
@@ -813,11 +819,23 @@ class TheNextWaveNode(Interface):
                 u = float(inc.velocities.x)
                 v = float(inc.velocities.y)
 
-                # Apply a tiny sim-only noise floor to avoid perfectly coherent
-                # wave inputs that can make MEM directional estimation singular.
+                # Optional slow per-buoy amplitude scaling for sim latent data.
+                latent_mode = str(self.params.latent_noise_mode).strip().lower()
+                if latent_mode in ('amplitude_scaling', 'both'):
+                    scale = self.compute_latent_amplitude_scale(swift_num, float(t_us))
+                    z *= scale
+                    u *= scale
+                    v *= scale
+
+                # Optional additive sim noise floor; helps avoid perfectly coherent
+                # inputs that can make MEM directional estimation singular.
                 std_z = float(self.params.latent_noise_std_z_m)
                 std_uv = float(self.params.latent_noise_std_uv_mps)
-                if (std_z > 0.0 or std_uv > 0.0) and self.latent_rng is not None:
+                if (
+                    latent_mode in ('additive', 'both')
+                    and (std_z > 0.0 or std_uv > 0.0)
+                    and self.latent_rng is not None
+                ):
                     if std_z > 0.0:
                         z = z + float(self.latent_rng.normal(0.0, std_z))
                     if std_uv > 0.0:
@@ -913,6 +931,48 @@ class TheNextWaveNode(Interface):
         if self.last_process_time_us is None:
             self.last_process_time_us = t_us
 
+    def compute_latent_amplitude_scale(self, swift_num: int, t_us: float) -> float:
+        """
+        Generate a per-buoy, slowly varying multiplicative amplitude scale.
+
+        The process is a continuous-time AR(1):
+            d_k = a * d_{k-1} + eps,  scale = 1 + d_k
+        where `a = exp(-dt/tau)` and `eps` preserves stationary std dev.
+        """
+        if self.latent_rng is None:
+            return 1.0
+
+        sigma = max(0.0, float(self.params.latent_scale_std_frac))
+        if sigma <= 0.0:
+            return 1.0
+
+        min_scale = float(self.params.latent_scale_min)
+        max_scale = float(self.params.latent_scale_max)
+        if min_scale > max_scale:
+            min_scale, max_scale = max_scale, min_scale
+
+        tau = float(self.params.latent_scale_tau_sec)
+        prev = self.latent_scale_state_by_swift.get(swift_num)
+
+        if prev is None:
+            delta = float(self.latent_rng.normal(0.0, sigma))
+        else:
+            prev_t_us, prev_delta = prev
+            dt_s = max(0.0, (float(t_us) - float(prev_t_us)) / 1e6)
+            if tau > 0.0:
+                alpha = float(np.exp(-dt_s / tau))
+            else:
+                alpha = 0.0
+            alpha = min(max(alpha, 0.0), 1.0)
+            innovation_std = sigma * float(np.sqrt(max(0.0, 1.0 - alpha * alpha)))
+            delta = (alpha * float(prev_delta)) + float(
+                self.latent_rng.normal(0.0, innovation_std)
+            )
+
+        scale = float(np.clip(1.0 + delta, min_scale, max_scale))
+        self.latent_scale_state_by_swift[swift_num] = (float(t_us), scale - 1.0)
+        return scale
+
     def reset_swift_window(self, swift_num: int) -> None:
         """
         Drop accumulated samples for a SWIFT and reset readiness state.
@@ -939,6 +999,9 @@ class TheNextWaveNode(Interface):
         self.window_ready = bool(self.window_ready_by_swift) and all(
             self.window_ready_by_swift.values()
         )
+
+        # Reset per-buoy latent amplitude state.
+        self.latent_scale_state_by_swift.pop(swift_num, None)
 
         # Also reset downsampling state so the first post-jump sample is accepted.
         self.last_accept_t_us_by_swift.pop(swift_num, None)
@@ -1091,6 +1154,11 @@ class TheNextWaveNode(Interface):
         self.declare_parameter('latent_noise_std_z_m', defaults.latent_noise_std_z_m)
         self.declare_parameter('latent_noise_std_uv_mps', defaults.latent_noise_std_uv_mps)
         self.declare_parameter('latent_noise_seed', defaults.latent_noise_seed)
+        self.declare_parameter('latent_noise_mode', defaults.latent_noise_mode)
+        self.declare_parameter('latent_scale_std_frac', defaults.latent_scale_std_frac)
+        self.declare_parameter('latent_scale_tau_sec', defaults.latent_scale_tau_sec)
+        self.declare_parameter('latent_scale_min', defaults.latent_scale_min)
+        self.declare_parameter('latent_scale_max', defaults.latent_scale_max)
 
         # Optional: when ingesting raw SBG via the TCP bridge without Gazebo/WEC topics,
         # replicate the coordinate frame and target location from example.py.
@@ -1112,6 +1180,31 @@ class TheNextWaveNode(Interface):
             self.get_parameter('latent_noise_std_uv_mps').value
         )
         params.latent_noise_seed = int(self.get_parameter('latent_noise_seed').value)
+        params.latent_noise_mode = str(self.get_parameter('latent_noise_mode').value)
+        params.latent_scale_std_frac = float(self.get_parameter('latent_scale_std_frac').value)
+        params.latent_scale_tau_sec = float(self.get_parameter('latent_scale_tau_sec').value)
+        params.latent_scale_min = float(self.get_parameter('latent_scale_min').value)
+        params.latent_scale_max = float(self.get_parameter('latent_scale_max').value)
+
+        # Normalize and validate latent noise settings.
+        mode_norm = params.latent_noise_mode.strip().lower()
+        allowed_modes = {'none', 'additive', 'amplitude_scaling', 'both'}
+        if mode_norm not in allowed_modes:
+            self.get_logger().warn(
+                'Unknown latent_noise_mode='
+                f"'{params.latent_noise_mode}', falling back to 'additive'"
+            )
+            mode_norm = 'additive'
+        params.latent_noise_mode = mode_norm
+
+        if params.latent_scale_min > params.latent_scale_max:
+            self.get_logger().warn(
+                'latent_scale_min > latent_scale_max; swapping configured bounds'
+            )
+            params.latent_scale_min, params.latent_scale_max = (
+                params.latent_scale_max,
+                params.latent_scale_min,
+            )
 
         params.sbg_use_example_frame = bool(
             self.get_parameter('sbg_bridge_use_example_frame').value
