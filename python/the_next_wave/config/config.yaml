@@ -17,17 +17,13 @@
     wec_actual_history_sec: 50.0
 
     # Least-squares solver tuning
-    lsq_ridge: 1.0e-6  # Avoids coefficient explosion when the parameter-space of the solver is
-                       # very flat
+    lsq_ridge: 1.0e-6  # overall MAP prior scale
+                       # main effect is when use_spectrum_weighted_ridge is false
     lsq_max_iter: 25  # 60
     lsq_solver_backend: auto  # auto | jax | scipy
     lsq_use_spectrum_weighted_ridge: true
-    lsq_spectrum_ridge_floor: 1.0e-6  # Provides conditioning on spectrum with low bounds to
-                                      # prevent solver from driving coefficients overly
-                                      # large/unstable to fit noise. Effect is similar to an
-                                      # MAP (Gaussian) prior with max of upper bound or this floor
-                                      # value as the stddev. Puts the ridge scaling in the same
-                                      # units as the solved coefficients.
+    lsq_spectrum_ridge_floor: 1.0e-6  # min per-component prior stddev (floor on ub); prevents
+                                      # infinite regularization on near-zero-energy components
     lsq_diagnostics_enable: false
     lsq_near_bound_ratio: 0.95
 

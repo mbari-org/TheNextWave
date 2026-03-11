@@ -41,7 +41,6 @@ def solve_box_ridge_lbfgsb(
             f"Invalid backend='{backend}'. Expected one of: auto, scipy, jax"
         )
 
-    # --- explicit jax request ---
     if backend_norm == 'jax':
         if solve_box_ridge_lbfgsb_jax is None:
             raise RuntimeError(
@@ -62,7 +61,7 @@ def solve_box_ridge_lbfgsb(
             else np.asarray(ridge_sigma_x, dtype=np.float64),
         )
 
-    # --- auto: prefer jax when available (GPU-accelerated), otherwise scipy ---
+    # auto: prefer jax if available, else scipy
     if backend_norm == 'auto' and solve_box_ridge_lbfgsb_jax is not None:
         return solve_box_ridge_lbfgsb_jax(
             np.asarray(P, dtype=np.float64),
@@ -192,10 +191,6 @@ def leastSquaresWavePropagation(
     spectrum_ridge_floor=1e-6,
     diagnostics=False,
     near_bound_ratio=0.95,
-    gram_diagnostics=False,
-    gram_diag_out_dir=None,
-    gram_diag_prefix='lsq',
-    gram_diag_subset_size=256,
     profiling=None,
 ):
     """
@@ -232,8 +227,8 @@ def leastSquaresWavePropagation(
     max_iter : int, optional
         Maximum optimizer iterations.
     solver_backend : str, optional
-        Solver backend selector: 'auto' (default), 'jax', or 'scipy'.
-        'auto' uses jax when jax[cuda] is importable, otherwise scipy.
+        Solver backend: 'auto' (default), 'jax', or 'scipy'.
+        auto uses jax when available, else scipy.
     use_spectrum_weighted_ridge : bool, optional
         If True, scale ridge penalty per component using spectrum-derived bounds.
     spectrum_ridge_floor : float, optional
@@ -242,14 +237,6 @@ def leastSquaresWavePropagation(
         If True, print solver diagnostics (iteration count, status, bound ratios).
     near_bound_ratio : float, optional
         Threshold (0-1) for counting coefficients as near the box bounds.
-    gram_diagnostics : bool, optional
-        If True, compute and optionally plot normalized Gram-matrix diagnostics.
-    gram_diag_out_dir : str or None, optional
-        If provided and matplotlib is available, write PNG plots in this directory.
-    gram_diag_prefix : str, optional
-        Prefix for Gram diagnostic output filenames.
-    gram_diag_subset_size : int, optional
-        Number of columns to visualize exactly in the correlation heatmap.
     profiling : dict or None, optional
         Mutable dictionary used to collect stage timing breakdowns in seconds.
 
@@ -651,23 +638,6 @@ def leastSquaresWavePropagation(
         print(f'solve time: {t:.4f} s', flush=True)
     # print(f'{A.sum()=}')
 
-    gram_diag = None
-    if gram_diagnostics:
-        try:
-            from .gram_diagnostics import gram_diagnostics as gram_diagnostics_fn
-
-            gram_diag = gram_diagnostics_fn(
-                P1_solve,
-                subset_size=int(gram_diag_subset_size),
-                out_dir=gram_diag_out_dir,
-                prefix=str(gram_diag_prefix),
-            )
-        except Exception as exc:
-            if diagnostics:
-                print(f'Gram diag: failed: {exc}', flush=True)
-
-    t_stage = prof_mark('gram_diag_s', t_stage)
-
     # Diagnostics: are coefficients sitting on bounds?
     # This helps distinguish a well-posed solve from an extrapolation/under-regularized solve.
     bound_ratio = np.abs(A) / ub
@@ -710,17 +680,6 @@ def leastSquaresWavePropagation(
             f'frac={frac_near:.3f} max={max_ratio:.3f} p95={p95_ratio:.3f}',
             flush=True,
         )
-
-        if gram_diag is not None:
-            print(
-                'Gram diag: '
-                f'm={gram_diag.n_rows} n={gram_diag.n_cols} '
-                f'offdiag_F_est={gram_diag.offdiag_fro_norm_est:.3e} '
-                f'offdiag_rms_est={gram_diag.offdiag_rms_est:.3e} '
-                f'max_abs_offdiag_sample={gram_diag.max_abs_offdiag_sample:.3e} '
-                f'n_pairs={gram_diag.n_pairs_sampled}',
-                flush=True,
-            )
 
     t_stage = prof_mark('diagnostics_s', t_stage)
 
