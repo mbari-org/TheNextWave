@@ -9,12 +9,7 @@ import scipy.stats as sps
 from .swift import LSQWavePropParams
 
 try:
-    from .solve_box_ridge_lbfgsb_gpu import solve_box_ridge_lbfgsb_gpu
-except Exception:
-    solve_box_ridge_lbfgsb_gpu = None
-
-try:
-    from .solve_box_ridge_lbfgsb_jax import solve_box_ridge_lbfgsb_jax as solve_box_ridge_lbfgsb_jax
+    from .solve_box_ridge_lbfgsb_jax import solve_box_ridge_lbfgsb_jax
 except Exception:
     solve_box_ridge_lbfgsb_jax = None
 
@@ -41,30 +36,12 @@ def solve_box_ridge_lbfgsb(
       - L-BFGS-B (fast, supports warm start via x0)
     """
     backend_norm = str(backend).strip().lower()
-    if backend_norm not in {'auto', 'gpu', 'scipy', 'jax'}:
+    if backend_norm not in {'auto', 'scipy', 'jax'}:
         raise ValueError(
-            f"Invalid backend='{backend}'. Expected one of: auto, gpu, scipy, jax"
+            f"Invalid backend='{backend}'. Expected one of: auto, scipy, jax"
         )
 
-    # --- explicit backend requests ---
-    if backend_norm == 'gpu':
-        if solve_box_ridge_lbfgsb_gpu is None:
-            raise RuntimeError(
-                "backend='gpu' requested but solve_box_ridge_lbfgsb_gpu module is not available"
-            )
-        return solve_box_ridge_lbfgsb_gpu(
-            np.asarray(P, dtype=np.float64),
-            np.asarray(b, dtype=np.float64),
-            np.asarray(lb, dtype=np.float64),
-            np.asarray(ub, dtype=np.float64),
-            x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
-            ridge=float(ridge),
-            max_iter=int(max_iter),
-            ridge_sigma_x=None
-            if ridge_sigma_x is None
-            else np.asarray(ridge_sigma_x, dtype=np.float64),
-        )
-
+    # --- explicit jax request ---
     if backend_norm == 'jax':
         if solve_box_ridge_lbfgsb_jax is None:
             raise RuntimeError(
@@ -85,14 +62,20 @@ def solve_box_ridge_lbfgsb(
             else np.asarray(ridge_sigma_x, dtype=np.float64),
         )
 
-    # --- auto priority: scipy -> jax -> gpu ---
-    # 'scipy' always falls through to the scipy path below.
-    # 'auto' selects scipy (always available); jax and gpu are only used when
-    # explicitly requested so that the known-correct scipy result is the default.
+    # --- auto: prefer jax when available (GPU-accelerated), otherwise scipy ---
     if backend_norm == 'auto' and solve_box_ridge_lbfgsb_jax is not None:
-        # uncomment the next two lines to promote jax above scipy in auto order:
-        # return solve_box_ridge_lbfgsb_jax(...)
-        pass  # currently auto == scipy
+        return solve_box_ridge_lbfgsb_jax(
+            np.asarray(P, dtype=np.float64),
+            np.asarray(b, dtype=np.float64),
+            np.asarray(lb, dtype=np.float64),
+            np.asarray(ub, dtype=np.float64),
+            x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
+            ridge=float(ridge),
+            max_iter=int(max_iter),
+            ridge_sigma_x=None
+            if ridge_sigma_x is None
+            else np.asarray(ridge_sigma_x, dtype=np.float64),
+        )
 
     # Row scaling: scale each row by its RMS to avoid huge disparities
     row_rms = np.sqrt(np.mean(P * P, axis=1))
@@ -249,7 +232,8 @@ def leastSquaresWavePropagation(
     max_iter : int, optional
         Maximum optimizer iterations.
     solver_backend : str, optional
-        Solver backend selector: 'auto', 'gpu', or 'scipy'.
+        Solver backend selector: 'auto' (default), 'jax', or 'scipy'.
+        'auto' uses jax when jax[cuda] is importable, otherwise scipy.
     use_spectrum_weighted_ridge : bool, optional
         If True, scale ridge penalty per component using spectrum-derived bounds.
     spectrum_ridge_floor : float, optional

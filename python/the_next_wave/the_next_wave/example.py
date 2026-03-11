@@ -64,10 +64,10 @@ def parse_args():
         '--solver-backend',
         type=str,
         default='auto',
-        choices=('auto', 'gpu', 'scipy', 'jax'),
-        help='Solver backend: auto/scipy (default, fastest on CPU), '
-             'jax (GPU only — slower than scipy on CPU), '
-             'gpu (lbfgsb-gpu CUDA extension).',
+        choices=('auto', 'scipy', 'jax'),
+        help='Solver backend: auto (default, uses jax/GPU when available, else scipy), '
+             'jax (always use jax — warns if no GPU found), '
+             'scipy (always use scipy, fastest on CPU).',
     )
     return p.parse_args()
 
