@@ -9,6 +9,12 @@ setup(
     name=package_name,
     version='0.1.0',
     packages=['the_next_wave'],
+    include_package_data=True,
+    package_data={
+        'the_next_wave': [
+            '*.so',
+        ],
+    },
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -16,7 +22,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml'))
     ],
-    zip_safe=True,
+    zip_safe=False,
     description=(
         'Deterministic ocean wave prediction from sparse buoy data. This '
         'methodology and codes generate phase-resolved reconstructions of ocean '

@@ -24,6 +24,7 @@
     lsq_ridge: 1.0e-6  # Avoids coefficient explosion when the parameter-space of the solver is
                # very flat
     lsq_max_iter: 60
+    lsq_solver_backend: auto  # auto | gpu | scipy
     lsq_use_spectrum_weighted_ridge: true
     lsq_spectrum_ridge_floor: 1.0e-6  # Provides conditioning on spectrum with low bounds to
                       # prevent solver from driving coefficients overly

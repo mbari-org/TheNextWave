@@ -8,6 +8,16 @@ import scipy.stats as sps
 
 from .swift import LSQWavePropParams
 
+try:
+    from .solve_box_ridge_lbfgsb_gpu import solve_box_ridge_lbfgsb_gpu
+except Exception:
+    solve_box_ridge_lbfgsb_gpu = None
+
+try:
+    from .solve_box_ridge_lbfgsb_jax import solve_box_ridge_lbfgsb_jax as solve_box_ridge_lbfgsb_jax
+except Exception:
+    solve_box_ridge_lbfgsb_jax = None
+
 trapz = getattr(np, 'trapz', np.trapezoid)
 
 
@@ -20,6 +30,7 @@ def solve_box_ridge_lbfgsb(
     ridge=1e-6,
     max_iter=80,
     ridge_sigma_x=None,
+    backend='auto',
 ):
     """
     Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub.
@@ -29,6 +40,60 @@ def solve_box_ridge_lbfgsb(
       - column scaling (improves conditioning)
       - L-BFGS-B (fast, supports warm start via x0)
     """
+    backend_norm = str(backend).strip().lower()
+    if backend_norm not in {'auto', 'gpu', 'scipy', 'jax'}:
+        raise ValueError(
+            f"Invalid backend='{backend}'. Expected one of: auto, gpu, scipy, jax"
+        )
+
+    # --- explicit backend requests ---
+    if backend_norm == 'gpu':
+        if solve_box_ridge_lbfgsb_gpu is None:
+            raise RuntimeError(
+                "backend='gpu' requested but solve_box_ridge_lbfgsb_gpu module is not available"
+            )
+        return solve_box_ridge_lbfgsb_gpu(
+            np.asarray(P, dtype=np.float64),
+            np.asarray(b, dtype=np.float64),
+            np.asarray(lb, dtype=np.float64),
+            np.asarray(ub, dtype=np.float64),
+            x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
+            ridge=float(ridge),
+            max_iter=int(max_iter),
+            ridge_sigma_x=None
+            if ridge_sigma_x is None
+            else np.asarray(ridge_sigma_x, dtype=np.float64),
+        )
+
+    if backend_norm == 'jax':
+        if solve_box_ridge_lbfgsb_jax is None:
+            raise RuntimeError(
+                "backend='jax' requested but jax/jaxopt are not available.\n"
+                "  CPU-only:  pip install jax jaxopt\n"
+                "  CUDA 13:   pip install 'jax[cuda13]' jaxopt"
+            )
+        return solve_box_ridge_lbfgsb_jax(
+            np.asarray(P, dtype=np.float64),
+            np.asarray(b, dtype=np.float64),
+            np.asarray(lb, dtype=np.float64),
+            np.asarray(ub, dtype=np.float64),
+            x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
+            ridge=float(ridge),
+            max_iter=int(max_iter),
+            ridge_sigma_x=None
+            if ridge_sigma_x is None
+            else np.asarray(ridge_sigma_x, dtype=np.float64),
+        )
+
+    # --- auto priority: scipy -> jax -> gpu ---
+    # 'scipy' always falls through to the scipy path below.
+    # 'auto' selects scipy (always available); jax and gpu are only used when
+    # explicitly requested so that the known-correct scipy result is the default.
+    if backend_norm == 'auto' and solve_box_ridge_lbfgsb_jax is not None:
+        # uncomment the next two lines to promote jax above scipy in auto order:
+        # return solve_box_ridge_lbfgsb_jax(...)
+        pass  # currently auto == scipy
+
     # Row scaling: scale each row by its RMS to avoid huge disparities
     row_rms = np.sqrt(np.mean(P * P, axis=1))
     row_rms[row_rms == 0.0] = 1.0
@@ -139,6 +204,7 @@ def leastSquaresWavePropagation(
     A0=None,
     ridge=1e-6,
     max_iter=60,
+    solver_backend='auto',
     use_spectrum_weighted_ridge=True,
     spectrum_ridge_floor=1e-6,
     diagnostics=False,
@@ -182,6 +248,8 @@ def leastSquaresWavePropagation(
         Ridge (L2) regularization strength.
     max_iter : int, optional
         Maximum optimizer iterations.
+    solver_backend : str, optional
+        Solver backend selector: 'auto', 'gpu', or 'scipy'.
     use_spectrum_weighted_ridge : bool, optional
         If True, scale ridge penalty per component using spectrum-derived bounds.
     spectrum_ridge_floor : float, optional
@@ -444,58 +512,96 @@ def leastSquaresWavePropagation(
         omega = np.asarray(omega, dtype=float).reshape((-1,))[good_base]
         amps_base = np.asarray(amps_base, dtype=float).reshape((-1,))[good_base]
 
-    amps = np.concatenate((amps_base, amps_base), axis=0)
+    amps = np.concatenate((amps_base, amps_base), axis=0).astype(np.float32, copy=False)
 
-    # reshape coordinates for phi matrices
-    x1 = x1.reshape((-1, 1), order='F')
-    x2 = x2.reshape((-1, 1), order='F')
-    y1 = y1.reshape((-1, 1), order='F')
-    y2 = y2.reshape((-1, 1), order='F')
-    kx = np.asarray(kx, dtype=float).reshape((-1, 1), order='F')
-    # print(f'{kx.mean()=}')
-    ky = np.asarray(ky, dtype=float).reshape((-1, 1), order='F')
-    # print(f'{ky.mean()=}')
-    t1 = t1.reshape((-1, 1), order='F')
-    t2 = t2.reshape((-1, 1), order='F')
-    omega = np.asarray(omega, dtype=float).reshape((-1, 1), order='F')
+    # reshape coordinates for phi matrices (float32 for faster trig + lower memory bandwidth)
+    work_dtype = np.float32
+    x1 = np.asarray(x1, dtype=work_dtype).reshape((-1, 1), order='F')
+    x2 = np.asarray(x2, dtype=work_dtype).reshape((-1, 1), order='F')
+    y1 = np.asarray(y1, dtype=work_dtype).reshape((-1, 1), order='F')
+    y2 = np.asarray(y2, dtype=work_dtype).reshape((-1, 1), order='F')
+    kx = np.asarray(kx, dtype=work_dtype).reshape((-1, 1), order='F')
+    ky = np.asarray(ky, dtype=work_dtype).reshape((-1, 1), order='F')
+    t1 = np.asarray(t1, dtype=work_dtype).reshape((-1, 1), order='F')
+    t2 = np.asarray(t2, dtype=work_dtype).reshape((-1, 1), order='F')
+    omega = np.asarray(omega, dtype=work_dtype).reshape((-1, 1), order='F')
+
+    # Reused velocity factors (avoid recomputing kx/sqrt(kx^2+ky^2) and ky/sqrt(...) many times).
+    k_norm = np.sqrt(kx * kx + ky * ky)
+    k_norm[k_norm == 0.0] = 1.0
+    vel_x = (kx / k_norm) * omega
+    vel_y = (ky / k_norm) * omega
 
     # Propagator matrices
     phi1 = x1 @ kx.T + y1 @ ky.T - t1 @ omega.T
+    t_stage = prof_mark('build_phi_input_s', t_stage)
     phi2 = x2 @ kx.T + y2 @ ky.T - t2 @ omega.T
 
-    t_stage = prof_mark('build_phi_s', t_stage)
+    t_stage = prof_mark('build_phi_output_s', t_stage)
 
     if use_vel:
-        P1_11 = np.cos(phi1)
-        P1_21 = (kx / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.cos(phi1)
-        P1_31 = (ky / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.cos(phi1)
-        P1_12 = np.sin(phi1)
-        P1_22 = (kx / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.sin(phi1)
-        P1_32 = (ky / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.sin(phi1)
+        cos1 = np.cos(phi1)
+        sin1 = np.sin(phi1)
+        t_stage = prof_mark('trig_input_s', t_stage)
 
-        row0 = np.hstack((P1_11, P1_12))
-        row1 = np.hstack((P1_21, P1_22))
-        row2 = np.hstack((P1_31, P1_32))
+        n_in = cos1.shape[0]
+        n_comp = cos1.shape[1]
+        P1 = np.empty((3 * n_in, 2 * n_comp), dtype=work_dtype)
 
-        P1 = np.vstack((row0, row1, row2))
+        P1[:n_in, :n_comp] = cos1
+        P1[:n_in, n_comp:] = sin1
 
-        P2_11 = np.cos(phi2)
-        P2_21 = (kx / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.cos(phi2)
-        P2_31 = (ky / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.cos(phi2)
-        P2_12 = np.sin(phi2)
-        P2_22 = (kx / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.sin(phi2)
-        P2_32 = (ky / np.sqrt(kx**2. + ky**2.)).T * omega.T * np.sin(phi2)
+        vel_x_t = vel_x.T
+        vel_y_t = vel_y.T
+        P1[n_in:2 * n_in, :n_comp] = vel_x_t * cos1
+        P1[n_in:2 * n_in, n_comp:] = vel_x_t * sin1
+        P1[2 * n_in:, :n_comp] = vel_y_t * cos1
+        P1[2 * n_in:, n_comp:] = vel_y_t * sin1
+        t_stage = prof_mark('assemble_P_input_s', t_stage)
 
-        row0 = np.hstack((P2_11, P2_12))
-        row1 = np.hstack((P2_21, P2_22))
-        row2 = np.hstack((P2_31, P2_32))
+        cos2 = np.cos(phi2)
+        sin2 = np.sin(phi2)
+        t_stage = prof_mark('trig_output_s', t_stage)
 
-        P2 = np.vstack((row0, row1, row2))
+        n_out = cos2.shape[0]
+        P2 = np.empty((3 * n_out, 2 * n_comp), dtype=work_dtype)
+
+        P2[:n_out, :n_comp] = cos2
+        P2[:n_out, n_comp:] = sin2
+        P2[n_out:2 * n_out, :n_comp] = vel_x_t * cos2
+        P2[n_out:2 * n_out, n_comp:] = vel_x_t * sin2
+        P2[2 * n_out:, :n_comp] = vel_y_t * cos2
+        P2[2 * n_out:, n_comp:] = vel_y_t * sin2
+        t_stage = prof_mark('assemble_P_output_s', t_stage)
     else:
-        P1 = np.hstack([np.cos(phi1), np.sin(phi1)])
-        P2 = np.hstack([np.cos(phi2), np.sin(phi2)])
+        cos1 = np.cos(phi1)
+        sin1 = np.sin(phi1)
+        t_stage = prof_mark('trig_input_s', t_stage)
 
-    t_stage = prof_mark('build_P_mats_s', t_stage)
+        n_in = cos1.shape[0]
+        n_comp = cos1.shape[1]
+        P1 = np.empty((n_in, 2 * n_comp), dtype=work_dtype)
+        P1[:, :n_comp] = cos1
+        P1[:, n_comp:] = sin1
+        t_stage = prof_mark('assemble_P_input_s', t_stage)
+
+        cos2 = np.cos(phi2)
+        sin2 = np.sin(phi2)
+        t_stage = prof_mark('trig_output_s', t_stage)
+
+        n_out = cos2.shape[0]
+        P2 = np.empty((n_out, 2 * n_comp), dtype=work_dtype)
+        P2[:, :n_comp] = cos2
+        P2[:, n_comp:] = sin2
+        t_stage = prof_mark('assemble_P_output_s', t_stage)
+
+    if prof is not None:
+        prof['build_P_mats_s'] = float(
+            prof.get('trig_input_s', 0.0)
+            + prof.get('assemble_P_input_s', 0.0)
+            + prof.get('trig_output_s', 0.0)
+            + prof.get('assemble_P_output_s', 0.0)
+        )
 
     # Safety: handle any remaining exact zeros.
     zero_mask = (amps == 0)
@@ -514,6 +620,7 @@ def leastSquaresWavePropagation(
                             np.asarray(v1).ravel(order='F')), axis=0)
     else:
         b = np.asarray(z1).ravel(order='F')
+    b = np.asarray(b, dtype=work_dtype)
 
     t_stage = prof_mark('build_rhs_s', t_stage)
 
@@ -534,15 +641,23 @@ def leastSquaresWavePropagation(
         # Use the same scale used by the box bounds (ub) so the prior matches the constraint.
         ridge_sigma_x = np.maximum(np.asarray(ub, dtype=float), float(spectrum_ridge_floor))
 
+    # Keep matrix construction fast in float32, but solve in float64 for optimizer stability.
+    P1_solve = np.asarray(P1, dtype=np.float64)
+    P2_solve = np.asarray(P2, dtype=np.float64)
+    b_solve = np.asarray(b, dtype=np.float64)
+    lb_solve = np.asarray(lb, dtype=np.float64)
+    ub_solve = np.asarray(ub, dtype=np.float64)
+
     A, info = solve_box_ridge_lbfgsb(
-        P1,
-        b,
-        lb,
-        ub,
+        P1_solve,
+        b_solve,
+        lb_solve,
+        ub_solve,
         x0=A0,  # pass previous A here for warm-start (see below)
         ridge=float(ridge),
         max_iter=int(max_iter),
         ridge_sigma_x=ridge_sigma_x,
+        backend=solver_backend,
     )
 
     t = time.time() - t_0
@@ -558,7 +673,7 @@ def leastSquaresWavePropagation(
             from .gram_diagnostics import gram_diagnostics as gram_diagnostics_fn
 
             gram_diag = gram_diagnostics_fn(
-                P1,
+                P1_solve,
                 subset_size=int(gram_diag_subset_size),
                 out_dir=gram_diag_out_dir,
                 prefix=str(gram_diag_prefix),
@@ -604,10 +719,10 @@ def leastSquaresWavePropagation(
 
         print(
             'LSQ diag: '
-            f'n_cols={P1.shape[1]} nit={nit}/{int(max_iter)} '
+            f'n_cols={P1_solve.shape[1]} nit={nit}/{int(max_iter)} '
             f'hit_maxiter={hit_maxiter} status={status} success={success} '
             f'msg="{message}" '
-            f'near_bound(thr={near_bound_ratio:.2f})={n_near}/{P1.shape[1]} '
+            f'near_bound(thr={near_bound_ratio:.2f})={n_near}/{P1_solve.shape[1]} '
             f'frac={frac_near:.3f} max={max_ratio:.3f} p95={p95_ratio:.3f}',
             flush=True,
         )
@@ -626,8 +741,8 @@ def leastSquaresWavePropagation(
     t_stage = prof_mark('diagnostics_s', t_stage)
 
     # reconstructed fields
-    zc = P1 @ A
-    z2 = P2 @ A
+    zc = P1_solve @ A
+    z2 = P2_solve @ A
     # print(f'{zc=} {z2=}')
 
     t_stage = prof_mark('recon_s', t_stage)
@@ -673,6 +788,19 @@ def leastSquaresWavePropagation(
 
     if prof is not None:
         prof['total_lsq_func_s'] = float(time.perf_counter() - float(prof.get('t0', t_stage)))
+        print(
+            'LSQ profile [ms]: '
+            f"spectrum={1e3*float(prof.get('spectrum_prep_s', 0.0)):.1f} "
+            f"k_theta={1e3*float(prof.get('build_k_theta_s', 0.0)):.1f} "
+            f"interp={1e3*float(prof.get('interp_griddata_s', 0.0)):.1f} "
+            f"phi_in={1e3*float(prof.get('build_phi_input_s', 0.0)):.1f} "
+            f"phi_out={1e3*float(prof.get('build_phi_output_s', 0.0)):.1f} "
+            f"P={1e3*float(prof.get('build_P_mats_s', 0.0)):.1f} "
+            f"rhs={1e3*float(prof.get('build_rhs_s', 0.0)):.1f} "
+            f"solve={1e3*float(prof.get('solve_total_s', 0.0)):.1f} "
+            f"total={1e3*float(prof.get('total_lsq_func_s', 0.0)):.1f}",
+            flush=True,
+        )
         # Remove private key to keep logs/results clean.
         prof.pop('t0', None)
 

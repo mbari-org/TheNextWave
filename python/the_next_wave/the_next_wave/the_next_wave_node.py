@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import threading
 import time
 import traceback
+import utm
 
 from builtin_interfaces.msg import Time as TimeMsg
 from buoy_api.interface import Interface
@@ -21,7 +22,6 @@ from buoy_interfaces.msg import XBRecord
 import numpy as np
 import rclpy
 from std_msgs.msg import Header
-import utm
 
 from . import TheNextWave, TheNextWaveConfig
 from .sbg_bridge_service import SbgBridgeService
@@ -87,6 +87,7 @@ class TheNextWaveNodeParams:
     # Least-squares solver controls
     lsq_ridge: float = 1e-6
     lsq_max_iter: int = 60
+    lsq_solver_backend: str = 'auto'
     lsq_use_spectrum_weighted_ridge: bool = True
     lsq_spectrum_ridge_floor: float = 1e-6
     lsq_diagnostics_enable: bool = False
@@ -138,6 +139,7 @@ class TheNextWaveNodeParams:
                 f'  sbg_bridge_port_by_swift={port_map_str},',
                 f'  lsq_ridge={self.lsq_ridge},',
                 f'  lsq_max_iter={self.lsq_max_iter},',
+                f"  lsq_solver_backend='{self.lsq_solver_backend}',",
                 f'  lsq_use_spectrum_weighted_ridge={self.lsq_use_spectrum_weighted_ridge},',
                 f'  lsq_spectrum_ridge_floor={self.lsq_spectrum_ridge_floor},',
                 f'  lsq_diagnostics_enable={self.lsq_diagnostics_enable},',
@@ -229,6 +231,7 @@ class TheNextWaveNode(Interface):
                 enable_dense_history_projection=self.params.enable_dense_history_projection,
                 lsq_ridge=self.params.lsq_ridge,
                 lsq_max_iter=self.params.lsq_max_iter,
+                lsq_solver_backend=self.params.lsq_solver_backend,
                 lsq_use_spectrum_weighted_ridge=self.params.lsq_use_spectrum_weighted_ridge,
                 lsq_spectrum_ridge_floor=self.params.lsq_spectrum_ridge_floor,
                 lsq_diagnostics_enable=self.params.lsq_diagnostics_enable,
@@ -1119,6 +1122,7 @@ class TheNextWaveNode(Interface):
         # Least-squares solver controls
         self.declare_parameter('lsq_ridge', defaults.lsq_ridge)
         self.declare_parameter('lsq_max_iter', defaults.lsq_max_iter)
+        self.declare_parameter('lsq_solver_backend', defaults.lsq_solver_backend)
         self.declare_parameter(
             'lsq_use_spectrum_weighted_ridge',
             defaults.lsq_use_spectrum_weighted_ridge,
@@ -1233,6 +1237,14 @@ class TheNextWaveNode(Interface):
 
         params.lsq_ridge = float(self.get_parameter('lsq_ridge').value)
         params.lsq_max_iter = int(self.get_parameter('lsq_max_iter').value)
+        params.lsq_solver_backend = str(self.get_parameter('lsq_solver_backend').value)
+        backend_norm = params.lsq_solver_backend.strip().lower()
+        if backend_norm not in {'auto', 'gpu', 'scipy'}:
+            self.get_logger().warn(
+                'Unknown lsq_solver_backend=' f"'{params.lsq_solver_backend}', falling back to 'auto'"
+            )
+            backend_norm = 'auto'
+        params.lsq_solver_backend = backend_norm
         params.lsq_use_spectrum_weighted_ridge = bool(
             self.get_parameter('lsq_use_spectrum_weighted_ridge').value
         )

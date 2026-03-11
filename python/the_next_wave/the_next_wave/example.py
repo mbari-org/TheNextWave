@@ -6,6 +6,7 @@ from pathlib import Path
 from matplotlib.animation import FFMpegWriter, PillowWriter
 import matplotlib.pyplot as plt
 import numpy as np
+import xarray as xr
 
 from .download_example_data import get_example_data_dir
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
@@ -42,9 +43,31 @@ def parse_args():
         help='Figure height in inches (used for both live window and movie frame size).',
     )
     p.add_argument(
-        '--show',
-        action='store_true',
-        help='Show the interactive window even if --movie is set.',
+        '--matlab-pred-nc',
+        type=str,
+        default=None,
+        help='Optional MATLAB NetCDF predictions file for overlay comparison.',
+    )
+    p.add_argument(
+        '--matlab-window-warn-sec',
+        type=float,
+        default=0.5,
+        help='Warn if MATLAB vs Python input window start/end differ by more than this [s].',
+    )
+    p.add_argument(
+        '--solver-max-iter',
+        type=int,
+        default=5,
+        help='Maximum number of iterations for the solver.',
+    )
+    p.add_argument(
+        '--solver-backend',
+        type=str,
+        default='auto',
+        choices=('auto', 'gpu', 'scipy', 'jax'),
+        help='Solver backend: auto/scipy (default, fastest on CPU), '
+             'jax (GPU only — slower than scipy on CPU), '
+             'gpu (lbfgsb-gpu CUDA extension).',
     )
     return p.parse_args()
 
@@ -52,14 +75,21 @@ def parse_args():
 A0 = None
 all_preds = Prediction()
 max_iter = 5
-
+solver_backend = 'auto'
+prev_t_start_diff = None
+matlab_ti_offset = 1  # index to offset MATLAB array to align with Python prediction window
+matlab_ti_offset_increment = 1  # iterative adjustment to offset
 
 def main():
     global A0
     global all_preds
     global max_iter
+    global solver_backend
 
     args = parse_args()
+    max_iter = args.solver_max_iter
+    solver_backend = str(args.solver_backend)
+    print(f'solver backend: {solver_backend}')
 
     # match MATLAB example
     latorigin = 41.6878
@@ -105,7 +135,7 @@ def main():
     # 1) wavespec via SWIFTdirectionalspectra() on processed SWIFT burst structs
     # Direction convention: use compass degrees True, direction waves come FROM.
     # (The plotter then draws propagation TO = FROM + 180.)
-    wavespec_base = build_wavespec_from_swifts(swifts.bursts(raw_sbg=False), recip=False)
+    wavespec_base = build_wavespec_from_swifts(swifts.bursts(raw_sbg=False), recip=True)
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
     wavespec_bulk = bulk_wave_params_from_wavespec(wavespec_base)
     print(format_bulk_wave_params(wavespec_bulk, 'wavespec'))
@@ -127,11 +157,21 @@ def main():
     nbuoys = zin.shape[1]
     n = zin.shape[0]
 
+    matlab_ds = None
+    matlab_ti = None
+    if args.matlab_pred_nc:
+        matlab_ds = xr.open_dataset(args.matlab_pred_nc)
+        if 'ti' in matlab_ds:
+            matlab_ti = np.asarray(matlab_ds['ti'].values, dtype=float).ravel()
+        else:
+            print('WARNING: matlab-pred-nc provided but missing variable `ti`; overlay disabled')
+            matlab_ds = None
+
     NTe = 10
     win_len = int(round(NTe * Te * fs))
     step = int(round(fs))  # ~1 second increments
 
-    if args.movie and not args.show:
+    if args.movie:
         plt.ioff()
     else:
         plt.ion()
@@ -237,6 +277,12 @@ def main():
         global A0
         global all_preds
         global max_iter
+        global solver_backend
+        global prev_t_start_diff
+        global matlab_ti_offset
+        global matlab_ti_offset_increment
+
+        warned_mismatch = False
 
         for ti in range(0, n, step):
             inputwindow = ti + np.arange(win_len)
@@ -257,6 +303,80 @@ def main():
             t_end = float(np.nanmax(tin[inputwindow, :]))
             print(f'solving prediction window: [{t_start}, {t_end}] s')
             tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
+
+            matlab_tpred = None
+            matlab_z = None
+            matlab_u = None
+            matlab_v = None
+            if matlab_ds is not None and matlab_ti is not None and matlab_ti.size:
+                # MATLAB loop is 1-based: ti_matlab = ti_python + 1
+                ti_target = float(ti + 1 + matlab_ti_offset)
+                idx = int(np.argmin(np.abs(matlab_ti - ti_target)))
+                print(f'ti target={ti_target:.1f}, matlab ti={matlab_ti[idx]:.1f} (idx={idx})')
+                if True:  # np.isfinite(matlab_ti[idx]) and abs(matlab_ti[idx] - ti_target) <= 0.5:
+                    try:
+                        matlab_t_start = float(
+                            np.asarray(matlab_ds['input_t_start'].values).ravel()[idx]
+                        )
+                        matlab_t_end = float(
+                            np.asarray(matlab_ds['input_t_end'].values).ravel()[idx]
+                        )
+                        start_1based = int(
+                            np.asarray(matlab_ds['window_start_idx'].values).ravel()[idx]
+                        )
+                        count = int(np.asarray(matlab_ds['window_count'].values).ravel()[idx])
+                        if count > 0:
+                            start = start_1based - 1
+                            stop = start + count
+                            matlab_tpred = np.asarray(
+                                matlab_ds['tpred_flat'].values[start:stop],
+                                dtype=float,
+                            )
+                            matlab_z = np.asarray(
+                                matlab_ds['zout_flat'].values[start:stop],
+                                dtype=float,
+                            )
+                            matlab_u = np.asarray(
+                                matlab_ds['uout_flat'].values[start:stop],
+                                dtype=float,
+                            )
+                            matlab_v = np.asarray(
+                                matlab_ds['vout_flat'].values[start:stop],
+                                dtype=float,
+                            )
+
+                            warn_sec = float(args.matlab_window_warn_sec)
+                            t_start_diff = abs(matlab_tpred[0] - tpred[0])
+                            print(f'{t_start_diff:.3f}s > {warn_sec:.3f}s?')
+                            if (
+                                not warned_mismatch
+                                and (
+                                     t_start_diff > warn_sec
+                                    # or abs(matlab_t_end - t_end) > warn_sec
+                                )
+                            ):
+                                print(
+                                    'WARNING: MATLAB/Python window mismatch exceeds threshold: '
+                                    f'|start|={t_start_diff:.3f}s, '
+                                    f'|end|={abs(matlab_tpred[-1] - tpred[-1]):.3f}s, '
+                                    f'threshold={warn_sec:.3f}s (ti_py={ti}, '
+                                    f'ti_mat={matlab_ti[idx]:.1f})'
+                                )
+                                if (
+                                    prev_t_start_diff is not None
+                                    and t_start_diff > prev_t_start_diff
+                                ):
+                                    matlab_ti_offset_increment *= -1
+                                prev_t_start_diff = t_start_diff
+                                matlab_ti_offset += matlab_ti_offset_increment
+                                # warned_mismatch = True
+                    except Exception as exc:
+                        if not warned_mismatch:
+                            print(
+                                f'WARNING: failed to read MATLAB overlay window '
+                                f'(ti={ti_target}): {exc}'
+                            )
+                            warned_mismatch = True
 
             xpred = np.full_like(tpred, xtarget, dtype=float)
             ypred = np.full_like(tpred, ytarget, dtype=float)
@@ -280,9 +400,10 @@ def main():
                 ws,
                 A0=A0,
                 max_iter=max_iter,
+                solver_backend=solver_backend,
             )
             A0 = params.A
-
+            print(f'solve time = {comp_time:.2f}s')
             prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
             zout = prediction[:, 0]
             uout = prediction[:, 1]
@@ -492,18 +613,29 @@ def main():
             ax_v_rc.set_xlabel('t [s]')
             apply_latched_ylim(ax_v_rc, 'v_recon', vr)
 
-            ax_z_pr.plot(tpred, zout, 'k')
+            ax_z_pr.plot(tpred, zout, 'k', label='python')
+            if matlab_tpred is not None:
+                ax_z_pr.plot(matlab_tpred, matlab_z, color='g', linewidth=1.5, label='matlab')
             ax_z_pr.set_ylabel('z pred [m]')
-            apply_latched_ylim(ax_z_pr, 'z_pred', zout)
+            z_pred_for_ylim = zout if matlab_z is None else np.concatenate((zout, matlab_z))
+            apply_latched_ylim(ax_z_pr, 'z_pred', z_pred_for_ylim)
+            if matlab_tpred is not None:
+                ax_z_pr.legend(loc='best', fontsize='small')
 
             ax_u_pr.plot(tpred, uout, 'k')
+            if matlab_tpred is not None:
+                ax_u_pr.plot(matlab_tpred, matlab_u, color='g', linewidth=1.5)
             ax_u_pr.set_ylabel('u pred [m/s]')
-            apply_latched_ylim(ax_u_pr, 'u_pred', uout)
+            u_pred_for_ylim = uout if matlab_u is None else np.concatenate((uout, matlab_u))
+            apply_latched_ylim(ax_u_pr, 'u_pred', u_pred_for_ylim)
 
             ax_v_pr.plot(tpred, vout, 'k')
+            if matlab_tpred is not None:
+                ax_v_pr.plot(matlab_tpred, matlab_v, color='g', linewidth=1.5)
             ax_v_pr.set_ylabel('v pred [m/s]')
             ax_v_pr.set_xlabel('t [s]')
-            apply_latched_ylim(ax_v_pr, 'v_pred', vout)
+            v_pred_for_ylim = vout if matlab_v is None else np.concatenate((vout, matlab_v))
+            apply_latched_ylim(ax_v_pr, 'v_pred', v_pred_for_ylim)
 
             if grab_frame:
                 writer.grab_frame()
@@ -517,8 +649,10 @@ def main():
         run_loop(grab_frame=False)
 
     all_preds.to_netcdf('predictions.nc')
-    plt.ioff()
-    plt.show()
+    if matlab_ds is not None:
+        matlab_ds.close()
+    # plt.ioff()
+    # plt.show()
 
 
 if __name__ == '__main__':

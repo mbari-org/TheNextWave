@@ -10,6 +10,10 @@
 
 clear
 
+%% optional NetCDF output (single file for all prediction windows)
+write_netcdf = true;
+ncfile = 'NextWave_predictions.nc';
+
 %% prepare a video of the results (fine to skip this)
 makevideo = true;
 if makevideo
@@ -87,12 +91,48 @@ load ./ExampleData/wavespec.mat
 
 Te = sum(wavespec.Etheta(:))./sum(sum(wavespec.Etheta,2) .* wavespec.f); % centroid wave period
 ce = 9.8 * Te / (2 * 3.14); % phase speed at centroid wave period
+NTe = 10; % number of wave periods to use in the input window (usually 10)
+
+if write_netcdf
+    if exist(ncfile, 'file') == 2
+        delete(ncfile);
+    end
+
+    % Per-window metadata (unlimited window dimension)
+    nccreate(ncfile, 'ti', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'input_t_start', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'input_t_end', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'leadtime', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'solve_time_s', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'xtarget', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'ytarget', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'window_start_idx', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'window_count', 'Dimensions', {'window', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+
+    % Flattened prediction arrays across all windows (unlimited sample dimension)
+    nccreate(ncfile, 'tpred_flat', 'Dimensions', {'sample', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'zout_flat', 'Dimensions', {'sample', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'uout_flat', 'Dimensions', {'sample', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+    nccreate(ncfile, 'vout_flat', 'Dimensions', {'sample', Inf}, 'Datatype', 'double', 'Format', 'netcdf4');
+
+    % Run-level metadata
+    ncwriteatt(ncfile, '/', 'latorigin', latorigin);
+    ncwriteatt(ncfile, '/', 'lonorigin', lonorigin);
+    ncwriteatt(ncfile, '/', 'rotation', rotation);
+    ncwriteatt(ncfile, '/', 'xtarget_nominal', xtarget);
+    ncwriteatt(ncfile, '/', 'ytarget_nominal', ytarget);
+    ncwriteatt(ncfile, '/', 'NTe', NTe);
+    ncwriteatt(ncfile, '/', 'fs_hz', fs);
+    ncwriteatt(ncfile, '/', 'Te_s', Te);
+    ncwriteatt(ncfile, '/', 'ce_mps', ce);
+
+    window_idx = 0;
+    sample_idx = 0;
+end
 
 
 %% run algorithm for a given output location
 % step through temporal windows making predictions
-NTe = 10; % number of wave periods to use in the input window (usually 10)
-
 for ti = 1:round(fs):length(tin) % for smooth results, increment the windows slowly (every 1 s, thus increment indexing by data sampling rate fs)
 
     inputwindow = ti + (1:(NTe * Te * fs)); % indices for the samples to be used
@@ -149,6 +189,32 @@ for ti = 1:round(fs):length(tin) % for smooth results, increment the windows slo
         subplot(6,2,12), plot(tpred,vout,'k'), ylabel('v_p [m/s]'),
         xlabel('t [s]')
 
+        if write_netcdf
+            window_idx = window_idx + 1;
+            nsamp = numel(tpred);
+            start_idx = sample_idx + 1;
+
+            % Per-window metadata
+            ncwrite(ncfile, 'ti', double(ti), window_idx);
+            input_t_window = tin(inputwindow,:);
+            ncwrite(ncfile, 'input_t_start', double(min(input_t_window(:))), window_idx);
+            ncwrite(ncfile, 'input_t_end', double(max(input_t_window(:))), window_idx);
+            ncwrite(ncfile, 'leadtime', double(leadtime), window_idx);
+            ncwrite(ncfile, 'solve_time_s', double(t), window_idx);
+            ncwrite(ncfile, 'xtarget', double(xtarget), window_idx);
+            ncwrite(ncfile, 'ytarget', double(ytarget), window_idx);
+            ncwrite(ncfile, 'window_start_idx', double(start_idx), window_idx);
+            ncwrite(ncfile, 'window_count', double(nsamp), window_idx);
+
+            % Flattened per-sample predictions for this window
+            ncwrite(ncfile, 'tpred_flat', double(tpred(:)), start_idx);
+            ncwrite(ncfile, 'zout_flat', double(zout(:)), start_idx);
+            ncwrite(ncfile, 'uout_flat', double(uout(:)), start_idx);
+            ncwrite(ncfile, 'vout_flat', double(vout(:)), start_idx);
+
+            sample_idx = sample_idx + nsamp;
+        end
+
         if makevideo
             currFrame = getframe(gcf);
             writeVideo(vidObj,currFrame);
@@ -159,6 +225,10 @@ end
 
 if makevideo
     close(vidObj);
+end
+
+if write_netcdf
+    fprintf('Wrote predictions to %s\n', ncfile);
 end
 
 

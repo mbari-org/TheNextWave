@@ -72,6 +72,7 @@ class TheNextWaveConfig:
     # Least-squares solver controls
     lsq_ridge: float = 1e-6
     lsq_max_iter: int = 60
+    lsq_solver_backend: str = 'auto'
     # Use spectrum-derived per-component scale as a prior (MAP / weighted ridge).
     # Default ON to discourage large cancelling coefficients that can blow up off-sensor.
     lsq_use_spectrum_weighted_ridge: bool = True
@@ -343,6 +344,7 @@ class TheNextWave:
             A0=self.A0,
             ridge=float(self.config.lsq_ridge),
             max_iter=int(self.config.lsq_max_iter),
+            solver_backend=str(self.config.lsq_solver_backend),
             use_spectrum_weighted_ridge=bool(self.config.lsq_use_spectrum_weighted_ridge),
             spectrum_ridge_floor=float(self.config.lsq_spectrum_ridge_floor),
             diagnostics=bool(self.config.lsq_diagnostics_enable),
