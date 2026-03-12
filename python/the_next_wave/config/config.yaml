@@ -1,7 +1,7 @@
 # Config for simulation with mbari_wec (gz sim)
 /the_next_wave_node:
   ros__parameters:
-    processing_interval_sec: 1.0
+    processing_interval_sec: 0.5
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
     # Use ENU-style local frame: x=east, y=north.
@@ -12,14 +12,14 @@
     # measurement window. Set to 0 to use the full window.
     dense_prediction_window: 50.0
     # If true, evaluate dense model output on WEC actual-history timestamps (sim only).
-    enable_dense_history_projection: false
+    enable_dense_history_projection: true
     # How much high-rate WEC actual history to package in each prediction message.
     wec_actual_history_sec: 50.0
 
     # Least-squares solver tuning
     lsq_ridge: 1.0e-6  # overall MAP prior scale
                        # main effect is when use_spectrum_weighted_ridge is false
-    lsq_max_iter: 25  # 60
+    lsq_max_iter: 60  # 60
     lsq_solver_backend: auto  # auto | jax | scipy
     lsq_use_spectrum_weighted_ridge: true
     lsq_spectrum_ridge_floor: 1.0e-6  # min per-component prior stddev (floor on ub); prevents

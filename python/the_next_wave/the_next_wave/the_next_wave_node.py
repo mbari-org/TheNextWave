@@ -333,6 +333,8 @@ class TheNextWaveNode(Interface):
         )
         with self.data_lock:
             if self.processing or not self.window_ready:
+                # Just skip this cycle if we are too slow.
+                # Don't queue up later and later predictions.
                 return
             # Set this here (before starting the thread) to avoid a race where
             # multiple timer callbacks can launch multiple processing threads.

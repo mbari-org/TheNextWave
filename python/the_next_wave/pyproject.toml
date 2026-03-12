@@ -30,6 +30,8 @@ dependencies = [
 
 [project.scripts]
 the_next_wave_example = "the_next_wave.example:main"
+the_next_wave_example_study = "the_next_wave.example_study:main"
+the_next_wave_example_loo = "the_next_wave.example_loo:main"
 the_next_wave_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_sim_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_plotter_node = "the_next_wave.the_next_wave_plotter_node:main"
