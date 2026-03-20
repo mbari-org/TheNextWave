@@ -13,8 +13,8 @@
     processing_interval_sec: 0.5
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
-    # Keep x/y in East/North so u/v (vel_e/vel_n) stay consistent.
-    rotation_deg: 0.0
+    # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
+    rotation_deg: 180.0
     downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     dense_prediction_window: 50.0

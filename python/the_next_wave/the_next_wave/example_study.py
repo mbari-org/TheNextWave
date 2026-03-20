@@ -74,6 +74,26 @@ def parse_args():
     p.add_argument('--dpi', type=int, default=150)
     p.add_argument('--fig-width', type=float, default=14.0)
     p.add_argument('--fig-height', type=float, default=12.0)
+    p.add_argument(
+        '--swift-gt-idx',
+        type=int,
+        default=None,
+        choices=(0, 1, 2, 3),
+        help=(
+            'Hold out this SWIFT buoy (0=swift22 .. 3=swift25) as ground truth '
+            'instead of MATLAB data.  The remaining buoys drive the solver; the '
+            'held-out buoy is used for overlay and error statistics.'
+        ),
+    )
+    p.add_argument(
+        '--wavespec-swift',
+        type=int,
+        default=None,
+        choices=(1, 2, 3, 4),
+        help='Use a single SWIFT buoy (1=SWIFT22, 2=SWIFT23, 3=SWIFT24, 4=SWIFT25) '
+             'for the wavespec used in predictions. '
+             'If omitted, uses the mean of all 4 buoys (default).',
+    )
     return p.parse_args()
 
 
@@ -101,7 +121,7 @@ def main():
     # --- data -----------------------------------------------------------
     latorigin = 41.6878
     lonorigin = -9.0545
-    rotation = 0.0
+    rotation = 180.0
     xtarget = 200.0
     ytarget = 200.0
     skipwarmup = 200
@@ -124,12 +144,26 @@ def main():
     select_idx = 91
     swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
 
-    wavespec_base = build_wavespec_from_swifts(swifts.bursts(raw_sbg=False), recip=True)
+    all_bursts  = swifts.bursts(raw_sbg=False)
+    swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
+    wavespec_swift_idx = args.wavespec_swift  # 1-based or None
+
+    if wavespec_swift_idx is not None:
+        sel_burst = all_bursts[wavespec_swift_idx - 1]
+        sel_label = swift_names[wavespec_swift_idx - 1]
+        wavespec_base = build_wavespec_from_swifts([sel_burst], recip=True)
+        print(f'wavespec for predictions: {sel_label} (--wavespec-swift {wavespec_swift_idx})')
+    else:
+        wavespec_base = build_wavespec_from_swifts(all_bursts, recip=True)
+        print('wavespec for predictions: mean of all 4 SWIFTs (default)')
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
     wavespec_bulk = bulk_wave_params_from_wavespec(wavespec_base)
     print(format_bulk_wave_params(wavespec_bulk, 'wavespec'))
 
-    zin, uin, vin, tin, xin, yin, fs = load_raw_arrays_from_sbg(
+    swift_gt_idx = args.swift_gt_idx
+    BUOY_LABELS = ['swift22', 'swift23', 'swift24', 'swift25']
+
+    zin_all, uin_all, vin_all, tin_all, xin_all, yin_all, fs = load_raw_arrays_from_sbg(
         swifts.bursts(raw_sbg=True),
         skipwarmup,
         burstend,
@@ -138,6 +172,37 @@ def main():
         rotation,
         flip_z_sign=True,
     )
+
+    if swift_gt_idx is not None:
+        in_idxs = [i for i in range(len(BUOY_LABELS)) if i != swift_gt_idx]
+        zin = zin_all[:, in_idxs]
+        uin = uin_all[:, in_idxs]
+        vin = vin_all[:, in_idxs]
+        tin = tin_all[:, in_idxs]
+        xin = xin_all[:, in_idxs]
+        yin = yin_all[:, in_idxs]
+        z_gt_full = zin_all[:, swift_gt_idx]
+        u_gt_full = uin_all[:, swift_gt_idx]
+        v_gt_full = vin_all[:, swift_gt_idx]
+        t_gt_full = tin_all[:, swift_gt_idx]
+        x_gt_full = xin_all[:, swift_gt_idx]
+        y_gt_full = yin_all[:, swift_gt_idx]
+        gt_label  = BUOY_LABELS[swift_gt_idx]
+        in_labels = [BUOY_LABELS[i] for i in in_idxs]
+        print(f'GT buoy: {gt_label}  |  input: {in_labels}')
+    else:
+        zin = zin_all
+        uin = uin_all
+        vin = vin_all
+        tin = tin_all
+        xin = xin_all
+        yin = yin_all
+        z_gt_full = u_gt_full = v_gt_full = t_gt_full = None
+        x_gt_full = y_gt_full = None
+        gt_label  = None
+        in_labels = BUOY_LABELS
+
+    ref_label = gt_label if swift_gt_idx is not None else 'matlab'
 
     nbuoys = zin.shape[1]
     n = zin.shape[0]
@@ -309,8 +374,18 @@ def main():
             if inputwindow[-1] >= n:
                 break
 
+            # Resolve per-window target position
+            if swift_gt_idx is not None:
+                ok_pos = np.isfinite(x_gt_full[inputwindow]) & np.isfinite(y_gt_full[inputwindow])
+                if not np.any(ok_pos):
+                    continue
+                xt = float(np.nanmedian(x_gt_full[inputwindow][ok_pos]))
+                yt = float(np.nanmedian(y_gt_full[inputwindow][ok_pos]))
+            else:
+                xt, yt = float(xtarget), float(ytarget)
+
             dist = np.sqrt(
-                (xin[inputwindow, :] - xtarget) ** 2 + (yin[inputwindow, :] - ytarget) ** 2
+                (xin[inputwindow, :] - xt) ** 2 + (yin[inputwindow, :] - yt) ** 2
             )
             maxtargetdistance = float(np.nanmax(dist))
             leadtime = maxtargetdistance / ce
@@ -362,8 +437,16 @@ def main():
                         print(f'WARNING: failed to read MATLAB window (ti={ti_target}): {exc}')
                         warned_mismatch = True
 
-            xpred = np.full_like(tpred, xtarget)
-            ypred = np.full_like(tpred, ytarget)
+            xpred = np.full_like(tpred, xt)
+            ypred = np.full_like(tpred, yt)
+
+            # If a SWIFT GT buoy is selected, populate matlab_* from it (drop-in for MATLAB)
+            if swift_gt_idx is not None and t_gt_full is not None:
+                matlab_tpred = t_gt_full
+                matlab_z     = z_gt_full
+                matlab_u     = u_gt_full
+                matlab_v     = v_gt_full
+                aligned = True
 
             # -- solve for each max_iter value ---------------------------
             results = []
@@ -385,8 +468,22 @@ def main():
                     ypred.reshape((-1, 1)),
                     ws,
                     A0=A0_list[iter_idx],
+                    A0_active_indices=None,
                     max_iter=mi,
                     solver_backend=solver_backend,
+                    ridge=0.0,
+                    use_spectrum_weighted_ridge=False,
+                    spectrum_ridge_floor=1e-6,
+                    gtol=0.1,
+                    lambda_time=0.0,
+                    lambda_freq_smooth=0.0,
+                    lambda_theta_smooth=0.0,
+                    freq_energy_frac=0.0,
+                    dir_energy_frac=0.0,
+                    active_grid_pad=1,
+                    use_rank_reduction=False,
+                    use_row_scale=False,
+                    use_col_scale=False,
                 )
                 A0_list[iter_idx] = params.A
                 print(f'  max_iter={mi:4d}  solve_time={comp_time:.3f}s')
@@ -408,7 +505,6 @@ def main():
 
                 # accumulate errors (aligned windows only)
                 if aligned and matlab_tpred is not None and matlab_tpred.size > 0:
-                    # interpolate MATLAB onto Python tpred grid
                     mz_i = np.interp(tpred, matlab_tpred, matlab_z)
                     mu_i = np.interp(tpred, matlab_tpred, matlab_u)
                     mv_i = np.interp(tpred, matlab_tpred, matlab_v)
@@ -420,7 +516,7 @@ def main():
                     errors_z_by_iter[iter_idx].append(ez)
                     errors_uv_by_iter[iter_idx].append(euv)
 
-                    # cross-correlation lag (positive = prediction is early / leads matlab)
+                    # cross-correlation lag (positive = prediction is early / leads reference)
                     n_sig = len(pz)
                     if n_sig > 4:
                         pz_c  = pz - pz.mean()
@@ -477,9 +573,18 @@ def main():
                 ax_map.plot([x_med], [y_med], marker='x', color=colors[j % len(colors)],
                             markersize=8, mew=2, linestyle='None', label=f'swift{22 + j}')
 
-            ax_map.plot([float(xtarget)], [float(ytarget)], 'ko', markersize=6, label='target')
-            x_all = np.concatenate([np.asarray(buoy_x), [xtarget]])
-            y_all = np.concatenate([np.asarray(buoy_y), [ytarget]])
+            if swift_gt_idx is not None:
+                loo_xw = x_gt_full[inputwindow]
+                loo_yw = y_gt_full[inputwindow]
+                ok_loo_w = np.isfinite(loo_xw) & np.isfinite(loo_yw)
+                if np.any(ok_loo_w):
+                    ax_map.plot(loo_xw[ok_loo_w], loo_yw[ok_loo_w], '.', color='gray',
+                                alpha=0.25, markersize=2)
+                ax_map.plot([xt], [yt], 'k^', markersize=8, label=gt_label)
+            else:
+                ax_map.plot([xt], [yt], 'ko', markersize=6, label='target')
+            x_all = np.concatenate([np.asarray(buoy_x), [xt]])
+            y_all = np.concatenate([np.asarray(buoy_y), [yt]])
             ok_all = np.isfinite(x_all) & np.isfinite(y_all)
             if np.any(ok_all):
                 dx = max(np.max(x_all[ok_all]) - np.min(x_all[ok_all]), 1.0)
@@ -503,14 +608,14 @@ def main():
                     xlim = ax_map.get_xlim(); ylim = ax_map.get_ylim()
                     L = max(5.0, 0.08 * max(abs(xlim[1] - xlim[0]), abs(ylim[1] - ylim[0])))
                     rad = np.deg2rad(dp_to)
-                    ax_map.arrow(float(xtarget), float(ytarget),
+                    ax_map.arrow(xt, yt,
                                  L * float(np.sin(rad)), L * float(np.cos(rad)),
                                  head_width=max(1.0, 0.15 * L), head_length=max(1.0, 0.20 * L),
                                  length_includes_head=True, color='k', alpha=0.8)
                     if np.isfinite(spread) and spread > 0.0:
                         a0 = 90.0 - dp_to
                         ax_map.add_patch(Wedge(
-                            (float(xtarget), float(ytarget)), r=1.1 * L,
+                            (xt, yt), r=1.1 * L,
                             theta1=a0 - 0.5 * spread, theta2=a0 + 0.5 * spread,
                             width=0.35 * L, facecolor='k', edgecolor='none', alpha=0.12,
                         ))
@@ -553,7 +658,7 @@ def main():
 
             ax_z_pr.plot(tpred, mid['zout'], 'k', label='python')
             if matlab_tpred is not None:
-                ax_z_pr.plot(matlab_tpred, matlab_z, color='g', lw=1.5, label='matlab')
+                ax_z_pr.plot(matlab_tpred, matlab_z, color='g', lw=1.5, label=ref_label)
                 ax_z_pr.legend(loc='best', fontsize='small')
             ax_z_pr.set_ylabel('z pred [m]')
             z_lim_data = mid['zout'] if matlab_z is None else np.concatenate((mid['zout'], matlab_z))
@@ -705,7 +810,7 @@ def main():
             ax_pkdt2.axhline(0.0, color='k', lw=0.8, ls='--')
             ax_pkdt2.set_xlabel('max_iter')
             ax_pkdt2.set_ylabel('\u0394n peaks')
-            ax_pkdt2.set_title('peak count diff vs matlab')
+            ax_pkdt2.set_title('peak count diff vs reference')
 
             def _draw_dist(ax, data_by_iter):
                 """Violin when >=4 points per group, else box, else scatter dots."""

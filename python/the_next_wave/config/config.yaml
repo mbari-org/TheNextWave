@@ -4,8 +4,8 @@
     processing_interval_sec: 0.5
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
-    # Use ENU-style local frame: x=east, y=north.
-    rotation_deg: 0.0
+    # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
+    rotation_deg: 180.0
     downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     # Only compute/publish dense_predictions_* for the last N seconds of the

@@ -30,6 +30,10 @@ rotation = 180;  % rotation of local coordinate system ** THIS MUST BE CONSISTEN
 xtarget = 200; % user determined target location for prediction in local coordinate system [meters]
 ytarget = 200; % user determined target location for prediction in local coordinate system [meters]
 
+% Optional: show measured vs reprojected z/u/v for one buoy in extra panels.
+% Set [] to disable, or 1..4 for SWIFT22..SWIFT25.
+reproj_swift_idx = 4;  % [];
+
 
 %% load example "burst" of raw data from SBG Ellipse sesnor running at 5 Hz on each buoy
 skipwarmup = 200; % number of samples to skip at the start of bursts (i.e., skipping AHRS initialization)
@@ -166,28 +170,50 @@ for ti = 1:round(fs):length(tin) % for smooth results, increment the windows slo
         % plot the results
         figure(1), clf
 
-        % map
-        subplot(2,2,2)
+        % map (top 3 rows, middle column)
+        subplot(6,3,[2 5 8])
         plot(xin(inputwindow,:), yin(inputwindow,:),'x','linewidth',2), hold on  % input positions
         plot(xpred,ypred,'ko','linewidth',2,'markersize',8)  % output (target) positions
         axis([0 500 0 500]), xlabel('x [m]'), ylabel('y [m]'), grid, axis equal
 
-        % input
-        subplot(6,2,1),  plot(tin(inputwindow,:),zin(inputwindow,:)), ylabel('z in [m]')
-        subplot(6,2,3),  plot(tin(inputwindow,:),uin(inputwindow,:)), ylabel('u in [m/s]')
-        subplot(6,2,5), plot(tin(inputwindow,:),vin(inputwindow,:)), ylabel('v in [m/s]')
+        % input (left column)
+        subplot(6,3,1),  plot(tin(inputwindow,:),zin(inputwindow,:)), ylabel('z in [m]')
+        subplot(6,3,4),  plot(tin(inputwindow,:),uin(inputwindow,:)), ylabel('u in [m/s]')
+        subplot(6,3,7),  plot(tin(inputwindow,:),vin(inputwindow,:)), ylabel('v in [m/s]')
 
-        % reconstruction
-        subplot(6,2,7),  plot(tin(inputwindow,:),zr), ylabel('z out [m]')
-        subplot(6,2,9),  plot(tin(inputwindow,:),ur), ylabel('u out [m/s]')
-        subplot(6,2,11), plot(tin(inputwindow,:),vr), ylabel('v out [m/s]')
+        % reconstruction (left column)
+        subplot(6,3,10), plot(tin(inputwindow,:),zr), ylabel('z out [m]')
+        subplot(6,3,13), plot(tin(inputwindow,:),ur), ylabel('u out [m/s]')
+        subplot(6,3,16), plot(tin(inputwindow,:),vr), ylabel('v out [m/s]')
         xlabel('t [s]')
 
-        % predictions
-        subplot(6,2,8), plot(tpred,zout,'k'), ylabel('z_p [m]')
-        subplot(6,2,10), plot(tpred,uout,'k'), ylabel('u_p [m/s]')
-        subplot(6,2,12), plot(tpred,vout,'k'), ylabel('v_p [m/s]'),
+        % predictions (middle column)
+        subplot(6,3,11), plot(tpred,zout,'k'), ylabel('z_p [m]')
+        subplot(6,3,14), plot(tpred,uout,'k'), ylabel('u_p [m/s]')
+        subplot(6,3,17), plot(tpred,vout,'k'), ylabel('v_p [m/s]')
         xlabel('t [s]')
+
+        % Optional measured vs reprojected (right column, bottom 3 rows)
+        if ~isempty(reproj_swift_idx) && reproj_swift_idx >= 1 && reproj_swift_idx <= nbuoys
+            j = reproj_swift_idx;
+            subplot(6,3,12)
+            plot(tin(inputwindow,j), zin(inputwindow,j), 'k'), hold on
+            plot(tin(inputwindow,j), zr(:,j), '-', 'Color', [0.85 0.33 0.10], 'LineWidth', 1.2)
+            ylabel('z [m]')
+            title(sprintf('swift%d: measured vs reprojected', 21 + j))
+            legend('meas','reproj','Location','best')
+
+            subplot(6,3,15)
+            plot(tin(inputwindow,j), uin(inputwindow,j), 'k'), hold on
+            plot(tin(inputwindow,j), ur(:,j), '-', 'Color', [0.85 0.33 0.10], 'LineWidth', 1.2)
+            ylabel('u [m/s]')
+
+            subplot(6,3,18)
+            plot(tin(inputwindow,j), vin(inputwindow,j), 'k'), hold on
+            plot(tin(inputwindow,j), vr(:,j), '-', 'Color', [0.85 0.33 0.10], 'LineWidth', 1.2)
+            ylabel('v [m/s]')
+            xlabel('t [s]')
+        end
 
         if write_netcdf
             window_idx = window_idx + 1;

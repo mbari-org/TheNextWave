@@ -35,14 +35,10 @@ from .utilities import (
 @dataclass
 class TheNextWaveConfig:
     expected_fs: float = 5.0
-    # Rotation applied in the lat/lon -> local x/y projection (clockwise-positive).
-    # With rotation_deg == 0, x=East and y=North (meters). If rotation_deg != 0,
-    # x/y are rotated axes.
-    #
-    # Important: the current pipeline does not automatically rotate (u,v) when
-    # rotation_deg is nonzero. To avoid mixing frames, prefer rotation_deg == 0
-    # unless you also rotate (u,v) consistently upstream.
-    rotation_deg: float = 0.0
+    # Rotation applied in the lat/lon -> local x/y projection.
+    # Matches MATLAB's GenericCoordinateTransform.m convention:
+    #   rotation=180 → x=+East, y=+North, consistent with u=vel_e and v=vel_n.
+    rotation_deg: float = 180.0
 
     # Projection origin convention.
     #
@@ -558,7 +554,8 @@ class TheNextWave:
         - `uin/vin` are expected to be East/North velocities in m/s.
         - `zin` is expected to be up-positive (meters) after applying `flip_z_sign`.
 
-        To keep (x,y) consistent with (u,v), prefer `rotation_deg = 0`.
+        Use `rotation_deg = 180` (MATLAB convention) so that x=+East and y=+North,
+        consistent with u=vel_e and v=vel_n.
         """
         sbgs: list[SBGData] = []
         for swift_num in range(22, 26):

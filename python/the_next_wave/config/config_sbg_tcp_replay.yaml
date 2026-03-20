@@ -13,8 +13,8 @@
     processing_interval_sec: 0.5
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
-    # Keep x/y in East/North so u/v (vel_e/vel_n) stay consistent.
-    rotation_deg: 0.0
+    # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
+    rotation_deg: 180.0
     # downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     dense_prediction_window: 50.0
@@ -42,10 +42,8 @@
     sbg_bridge_bind: 0.0.0.0
     example_latorigin: 41.6878
     example_lonorigin: -9.0545
-    # Python's generic_coordinate_transform uses rotation_deg=0 for East/North.
-    # (MATLAB's SWIFTcodes GenericCoordinateTransform uses rotation=180 for the
-    # equivalent convention.)
-    example_rotation_deg: 0.0
+    # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
+    example_rotation_deg: 180.0
     example_xtarget: 200.0
     example_ytarget: 200.0
 

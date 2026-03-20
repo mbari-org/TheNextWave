@@ -65,7 +65,7 @@ class TheNextWaveNodeParams:
     sbg_use_example_frame: bool = False
     example_latorigin: float = 41.6878
     example_lonorigin: float = -9.0545
-    example_rotation_deg: float = 0.0
+    example_rotation_deg: float = 180.0
     example_xtarget: float = 200.0
     example_ytarget: float = 200.0
     swift_idx: OrderedDict[str, int] = field(default_factory=OrderedDict)

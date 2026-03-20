@@ -27,6 +27,16 @@ class WaveSpec:
     f: npt.NDArray[np.float64] = field(default_factory=empty_float64)
     spread: npt.NDArray[np.float64] = field(default_factory=empty_float64)
     spread2: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    # Per-frequency dominant direction [deg compass True, FROM convention].
+    # Populated by build_wavespec_from_swifts from the SWIFTdirectionalspectra
+    # atan2(b1,a1) output (matches MATLAB SBGWaves.m `dir` vector).
+    # Used by bulk_dir_params_from_Etheta to compute Dp/Dm the MATLAB way.
+    dir: npt.NDArray[np.float64] = field(default_factory=empty_float64)
+    # 1D energy spectrum E(f) [m^2/Hz] taken directly from SWIFTdirectionalspectra
+    # (i.e. the raw wavespectra.energy / C11 sensor data, averaged across buoys).
+    # Using this avoids re-deriving E by integrating Etheta over theta, which
+    # introduces a theta-resolution scaling error in Hs.
+    E: npt.NDArray[np.float64] = field(default_factory=empty_float64)
 
 
 def get_field_meta(dc_type) -> Dict[str, Dict[str, Any]]:

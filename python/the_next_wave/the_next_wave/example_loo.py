@@ -3,8 +3,8 @@
 Leave-one-out (LOO) validation example.
 
 One buoy is withheld from the solver constellation and used as ground truth.
-Its measured z/u/v at prediction times are compared directly against the
-solver's prediction at that buoy's location.
+Its measured z/u/v are plotted as a continuous timeseries; the solver's
+prediction at that buoy's location is overlaid wherever it falls in time.
 
 Default: SWIFT25 (index 3) is the held-out target.
 SWIFT22, 23, 24 (indices 0-2) drive the solver.
@@ -16,7 +16,6 @@ from pathlib import Path
 from matplotlib.animation import FFMpegWriter, PillowWriter
 import matplotlib.pyplot as plt
 import numpy as np
-import xarray as xr
 
 from .download_example_data import get_example_data_dir
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
@@ -42,76 +41,51 @@ def parse_args():
         choices=(0, 1, 2, 3),
         help='Column index of the buoy to leave out (0=swift22 .. 3=swift25). Default 3.',
     )
-    p.add_argument(
-        '--movie',
-        type=str,
-        default=None,
-        help='Write animation to this path (.mp4 or .gif).',
-    )
+    p.add_argument('--movie', type=str, default=None,
+                   help='Write animation to this path (.mp4 or .gif).')
     p.add_argument('--fps', type=float, default=10.0)
     p.add_argument('--dpi', type=int, default=150)
+    p.add_argument('--fig-width',  type=float, default=12.0)
+    p.add_argument('--fig-height', type=float, default=12.0)
+    p.add_argument('--solver-max-iter', type=int, default=5,
+                   help='Maximum solver iterations.')
+    p.add_argument('--solver-backend', type=str, default='auto',
+                   choices=('auto', 'scipy', 'jax'))
     p.add_argument(
-        '--fig-width', type=float, default=12.0,
-        help='Figure width in inches.',
-    )
-    p.add_argument(
-        '--fig-height', type=float, default=12.0,
-        help='Figure height in inches.',
-    )
-    p.add_argument(
-        '--matlab-pred-nc',
-        type=str,
-        default=None,
-        help='Optional MATLAB NetCDF predictions file for secondary overlay.',
-    )
-    p.add_argument(
-        '--matlab-window-warn-sec',
-        type=float,
-        default=0.5,
-        help='Warn if MATLAB vs Python input window start/end differ by more than this [s].',
-    )
-    p.add_argument(
-        '--solver-max-iter',
+        '--wavespec-swift',
         type=int,
-        default=5,
-        help='Maximum solver iterations.',
-    )
-    p.add_argument(
-        '--solver-backend',
-        type=str,
-        default='auto',
-        choices=('auto', 'scipy', 'jax'),
-        help='Solver backend.',
+        default=None,
+        choices=(1, 2, 3, 4),
+        help='Use a single SWIFT buoy (1=SWIFT22, 2=SWIFT23, 3=SWIFT24, 4=SWIFT25) '
+             'for the wavespec used in predictions. '
+             'If omitted, uses the mean of all 4 buoys (default).',
     )
     return p.parse_args()
 
 
 A0 = None
+A0_indices = None
 all_preds = Prediction()
-prev_t_start_diff = None
-matlab_ti_offset = 2
-matlab_ti_offset_increment = 1
 
 
 def main():
-    global A0, all_preds, prev_t_start_diff
-    global matlab_ti_offset, matlab_ti_offset_increment
+    global A0, A0_indices, all_preds
 
     args = parse_args()
-    loo_idx = int(args.loo_idx)
-    in_idxs = [i for i in range(len(BUOY_LABELS)) if i != loo_idx]
-    max_iter = int(args.solver_max_iter)
+    loo_idx        = int(args.loo_idx)
+    in_idxs        = [i for i in range(len(BUOY_LABELS)) if i != loo_idx]
+    max_iter       = int(args.solver_max_iter)
     solver_backend = str(args.solver_backend)
 
     loo_label = BUOY_LABELS[loo_idx]
-    in_labels  = [BUOY_LABELS[i] for i in in_idxs]
+    in_labels = [BUOY_LABELS[i] for i in in_idxs]
     print(f'LOO: held-out = {loo_label}  |  input = {in_labels}')
     print(f'solver backend: {solver_backend}  max_iter: {max_iter}')
 
     # --- data -----------------------------------------------------------
     latorigin = 41.6878
     lonorigin = -9.0545
-    rotation  = 0.0
+    rotation  = 180.0  # MATLAB convention: rotation=180 → x=+East, y=+North
     skipwarmup = 200
     burstend   = 2740
 
@@ -132,13 +106,23 @@ def main():
     select_idx = 91
     swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
 
-    # Build wavespec from all-buoy processed burst structs (same as full example)
-    wavespec_base = build_wavespec_from_swifts(swifts.bursts(raw_sbg=False), recip=True)
+    all_bursts = swifts.bursts(raw_sbg=False)
+    swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
+    wavespec_swift_idx = args.wavespec_swift
+
+    if wavespec_swift_idx is not None:
+        sel_burst = all_bursts[wavespec_swift_idx - 1]
+        sel_label = swift_names[wavespec_swift_idx - 1]
+        wavespec_base = build_wavespec_from_swifts([sel_burst], recip=True)
+        print(f'wavespec for predictions: {sel_label} (--wavespec-swift {wavespec_swift_idx})')
+    else:
+        wavespec_base = build_wavespec_from_swifts(all_bursts, recip=True)
+        print('wavespec for predictions: mean of all 4 SWIFTs (default)')
+
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
     wavespec_bulk = bulk_wave_params_from_wavespec(wavespec_base)
     print(format_bulk_wave_params(wavespec_bulk, 'wavespec'))
 
-    # Load full 4-buoy raw arrays, then split into input vs LOO columns
     zin_all, uin_all, vin_all, tin_all, xin_all, yin_all, fs = load_raw_arrays_from_sbg(
         swifts.bursts(raw_sbg=True),
         skipwarmup,
@@ -149,7 +133,7 @@ def main():
         flip_z_sign=True,
     )
 
-    # Input constellation (all columns except loo_idx)
+    # Input constellation
     zin = zin_all[:, in_idxs]
     uin = uin_all[:, in_idxs]
     vin = vin_all[:, in_idxs]
@@ -157,31 +141,22 @@ def main():
     xin = xin_all[:, in_idxs]
     yin = yin_all[:, in_idxs]
 
-    # Held-out buoy (LOO ground truth)
-    z_loo = zin_all[:, loo_idx]   # (N,)
+    # Held-out buoy full timeseries (ground truth)
+    z_loo = zin_all[:, loo_idx]
     u_loo = uin_all[:, loo_idx]
     v_loo = vin_all[:, loo_idx]
     t_loo = tin_all[:, loo_idx]
     x_loo = xin_all[:, loo_idx]
     y_loo = yin_all[:, loo_idx]
 
-    n_in  = len(in_idxs)
-    n     = zin.shape[0]
+    n_in = len(in_idxs)
+    n    = zin.shape[0]
 
-    matlab_ds = None
-    matlab_ti = None
-    if args.matlab_pred_nc:
-        matlab_ds = xr.open_dataset(args.matlab_pred_nc)
-        if 'ti' in matlab_ds:
-            matlab_ti = np.asarray(matlab_ds['ti'].values, dtype=float).ravel()
-        else:
-            print('WARNING: matlab-pred-nc provided but missing variable `ti`; overlay disabled')
-            matlab_ds = None
-
-    NTe    = 10
+    NTe     = 10
     win_len = int(round(NTe * Te * fs))
     step    = int(round(fs))  # ~1 s increments
 
+    # --- Figure 1: animation (map + input + recon + prediction) ---------
     if args.movie:
         plt.ioff()
     else:
@@ -190,38 +165,62 @@ def main():
     fw = max(float(args.fig_width),  8.0)
     fh = max(float(args.fig_height), 8.0)
 
-    fig = plt.figure(1, figsize=(fw, fh))
-    fig.set_size_inches(fw, fh, forward=True)
-    fig.clf()
+    fig1 = plt.figure(1, figsize=(fw, fh))
+    fig1.set_size_inches(fw, fh, forward=True)
+    fig1.clf()
     try:
-        fig.set_constrained_layout(False)
+        fig1.set_constrained_layout(False)
     except Exception:
         pass
 
-    gs = fig.add_gridspec(
+    gs1 = fig1.add_gridspec(
         nrows=6, ncols=2,
         left=0.10, right=0.985, bottom=0.07, top=0.965,
         wspace=0.30, hspace=0.33,
     )
 
-    ax_z_in = fig.add_subplot(gs[0, 0])
-    ax_u_in = fig.add_subplot(gs[1, 0], sharex=ax_z_in)
-    ax_v_in = fig.add_subplot(gs[2, 0], sharex=ax_z_in)
-    ax_z_rc = fig.add_subplot(gs[3, 0], sharex=ax_z_in)
-    ax_u_rc = fig.add_subplot(gs[4, 0], sharex=ax_z_in)
-    ax_v_rc = fig.add_subplot(gs[5, 0], sharex=ax_z_in)
+    ax_z_in = fig1.add_subplot(gs1[0, 0])
+    ax_u_in = fig1.add_subplot(gs1[1, 0], sharex=ax_z_in)
+    ax_v_in = fig1.add_subplot(gs1[2, 0], sharex=ax_z_in)
+    ax_z_rc = fig1.add_subplot(gs1[3, 0], sharex=ax_z_in)
+    ax_u_rc = fig1.add_subplot(gs1[4, 0], sharex=ax_z_in)
+    ax_v_rc = fig1.add_subplot(gs1[5, 0], sharex=ax_z_in)
+    ax_map  = fig1.add_subplot(gs1[0:3, 1])
+    ax_z_pr = fig1.add_subplot(gs1[3, 1])
+    ax_u_pr = fig1.add_subplot(gs1[4, 1], sharex=ax_z_pr)
+    ax_v_pr = fig1.add_subplot(gs1[5, 1], sharex=ax_z_pr)
 
-    ax_map  = fig.add_subplot(gs[0:3, 1])
-    ax_z_pr = fig.add_subplot(gs[3, 1])
-    ax_u_pr = fig.add_subplot(gs[4, 1], sharex=ax_z_pr)
-    ax_v_pr = fig.add_subplot(gs[5, 1], sharex=ax_z_pr)
-
-    axes_all = (
+    axes_fig1 = (
         ax_map,
         ax_z_in, ax_u_in, ax_v_in,
         ax_z_rc, ax_u_rc, ax_v_rc,
         ax_z_pr, ax_u_pr, ax_v_pr,
     )
+
+    # --- Figure 2: study-style error summary ----------------------------
+    fig2, axes2 = plt.subplots(3, 3, figsize=(fw * 1.1, fh * 1.1), num=2)
+    fig2.subplots_adjust(left=0.08, right=0.97, bottom=0.08, top=0.93,
+                         wspace=0.35, hspace=0.45)
+
+    ax_z_ts   = axes2[0, 0]
+    ax_u_ts   = axes2[0, 1]
+    ax_v_ts   = axes2[0, 2]
+    ax_z_err  = axes2[1, 0]
+    ax_uv_err = axes2[1, 1]
+    ax_ct     = axes2[1, 2]
+    ax_xcorr  = axes2[2, 0]
+    ax_peak   = axes2[2, 1]
+    ax_npeak  = axes2[2, 2]
+
+    # Storage for study metrics
+    all_horizons_z  = []
+    all_z_errors    = []
+    all_horizons_uv = []
+    all_uv_errors   = []
+    all_comp_times  = []
+    all_xcorr_lags  = []
+    all_peak_errors = []
+    all_npeak_diffs = []
 
     pred_latched_y_limits: dict[str, tuple[float, float]] = {}
 
@@ -257,11 +256,25 @@ def main():
         suffix = movie_path.suffix.lower()
         writer = PillowWriter(fps=args.fps) if suffix == '.gif' else FFMpegWriter(fps=args.fps)
 
-    warned_mismatch = False
+    # Row 0 of Fig 2: draw the full LOO measured timeseries once (sticky baseline)
+    ax_z_ts.plot(t_loo, z_loo, color='limegreen', lw=1.0, label=f'{loo_label}')
+    ax_z_ts.set_ylabel('z [m]')
+    ax_z_ts.set_xlabel('t [s]')
+    ax_z_ts.set_title('z timeseries', fontsize=9)
+    ax_z_ts.legend(loc='best', fontsize='small')
+
+    ax_u_ts.plot(t_loo, u_loo, color='limegreen', lw=1.0)
+    ax_u_ts.set_ylabel('u [m/s]')
+    ax_u_ts.set_xlabel('t [s]')
+    ax_u_ts.set_title('u timeseries', fontsize=9)
+
+    ax_v_ts.plot(t_loo, v_loo, color='limegreen', lw=1.0)
+    ax_v_ts.set_ylabel('v [m/s]')
+    ax_v_ts.set_xlabel('t [s]')
+    ax_v_ts.set_title('v timeseries', fontsize=9)
 
     def run_loop(grab_frame=False):
-        global A0, all_preds, prev_t_start_diff
-        global matlab_ti_offset, matlab_ti_offset_increment
+        global A0, A0_indices, all_preds
 
         for ti in range(0, n, step):
             inputwindow = ti + np.arange(win_len)
@@ -289,62 +302,10 @@ def main():
             t_end   = float(np.nanmax(tin[inputwindow, :]))
             print(f'solving [{t_start:.1f}, {t_end:.1f}] s  target=({xtarget:.1f},{ytarget:.1f})')
 
+            # tpred is derived entirely from the input constellation timing
             tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
             xpred = np.full_like(tpred, xtarget)
             ypred = np.full_like(tpred, ytarget)
-
-            # Ground truth: LOO buoy measured at prediction times
-            t_loo_win  = t_loo[inputwindow]
-            t_loo_full = t_loo   # full time series for interpolation
-
-            # Interpolate LOO measurements at tpred times.
-            # flip_z_sign=True negates z but not u/v.  The solver absorbs the z
-            # sign flip into the fitted amplitudes and predicts zout in the
-            # *original* (unflipped) sign convention.  To compare fairly, undo
-            # the flip on z_loo so both sides are in the same space.
-            ok_loo = np.isfinite(t_loo_full) & np.isfinite(z_loo)
-            if np.sum(ok_loo) > 1:
-                t_ok   = t_loo_full[ok_loo]
-                z_gt   = np.interp(tpred, t_ok, -z_loo[ok_loo])  # undo flip_z_sign
-                u_gt   = np.interp(tpred, t_ok,  u_loo[ok_loo])
-                v_gt   = np.interp(tpred, t_ok,  v_loo[ok_loo])
-            else:
-                z_gt = u_gt = v_gt = np.full_like(tpred, np.nan)
-
-            # Optional MATLAB overlay
-            matlab_tpred = matlab_z = matlab_u = matlab_v = None
-
-            if matlab_ds is not None and matlab_ti is not None and matlab_ti.size:
-                ti_target = float(ti + 1 + matlab_ti_offset)
-                idx = int(np.argmin(np.abs(matlab_ti - ti_target)))
-                try:
-                    start_1based = int(
-                        np.asarray(matlab_ds['window_start_idx'].values).ravel()[idx]
-                    )
-                    count = int(np.asarray(matlab_ds['window_count'].values).ravel()[idx])
-                    if count > 0:
-                        start = start_1based - 1
-                        stop  = start + count
-                        matlab_tpred = np.asarray(matlab_ds['tpred_flat'].values[start:stop], dtype=float)
-                        matlab_z     = np.asarray(matlab_ds['zout_flat'].values[start:stop], dtype=float)
-                        matlab_u     = np.asarray(matlab_ds['uout_flat'].values[start:stop], dtype=float)
-                        matlab_v     = np.asarray(matlab_ds['vout_flat'].values[start:stop], dtype=float)
-
-                        warn_sec = float(args.matlab_window_warn_sec)
-                        t_start_diff = abs(matlab_tpred[0] - tpred[0])
-                        if t_start_diff > warn_sec:
-                            if (
-                                not warned_mismatch
-                                and prev_t_start_diff is not None
-                                and t_start_diff > prev_t_start_diff
-                            ):
-                                matlab_ti_offset_increment *= -1
-                            prev_t_start_diff = t_start_diff
-                            matlab_ti_offset += matlab_ti_offset_increment
-                            matlab_tpred = matlab_z = matlab_u = matlab_v = None
-                except Exception as exc:
-                    if not warned_mismatch:
-                        print(f'WARNING: failed to read MATLAB window (ti={ti_target}): {exc}')
 
             # --- solve --------------------------------------------------
             ws = WaveSpec()
@@ -365,9 +326,26 @@ def main():
                 ws,
                 A0=A0,
                 max_iter=max_iter,
+                A0_active_indices=None,
                 solver_backend=solver_backend,
+                ridge=0.0,
+                use_spectrum_weighted_ridge=False,
+                spectrum_ridge_floor=1e-6,
+                diagnostics=True,
+                gtol=0.1,
+                lambda_time=0.0,
+                lambda_freq_smooth=0.0,
+                lambda_theta_smooth=0.0,
+                freq_energy_frac=0.0,
+                dir_energy_frac=0.0,
+                active_grid_pad=1,
+                print_losses=True,
+                use_rank_reduction=False,
+                use_row_scale=False,
+                use_col_scale=False,
             )
             A0 = params.A
+            A0_indices = params.active_good_indices
             print(f'  solve_time={comp_time:.3f}s')
 
             prediction     = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
@@ -381,25 +359,73 @@ def main():
 
             all_preds.append_window(
                 window_start_time=t_start,
-                tm=tin[inputwindow, :],
-                zm=zin[inputwindow, :],
-                um=uin[inputwindow, :],
-                vm=vin[inputwindow, :],
-                xm=xin[inputwindow, :],
-                ym=yin[inputwindow, :],
-                zc=zr,
-                uc=ur,
-                vc=vr,
-                tp=tpred,
-                zp=zout,
-                up=uout,
-                vp=vout,
-                params=params,
-                comp_time=float(comp_time),
+                tm=tin[inputwindow, :], zm=zin[inputwindow, :],
+                um=uin[inputwindow, :], vm=vin[inputwindow, :],
+                xm=xin[inputwindow, :], ym=yin[inputwindow, :],
+                zc=zr, uc=ur, vc=vr,
+                tp=tpred, zp=zout, up=uout, vp=vout,
+                params=params, comp_time=float(comp_time),
             )
 
-            # --- plot ---------------------------------------------------
-            for ax in axes_all:
+            all_comp_times.append(float(comp_time))
+
+            # --- error metrics vs LOO ground truth ----------------------
+            # Interpolate LOO onto tpred wherever tpred falls within t_loo
+            ok_loo = np.isfinite(t_loo) & np.isfinite(z_loo)
+            if np.sum(ok_loo) > 1:
+                t_loo_ok = t_loo[ok_loo]
+                within   = (tpred >= t_loo_ok[0]) & (tpred <= t_loo_ok[-1])
+                if np.any(within):
+                    tp_in    = tpred[within]
+                    horizons = tp_in - t_end
+
+                    z_gt_i = np.interp(tp_in, t_loo_ok, z_loo[ok_loo])
+                    u_gt_i = np.interp(tp_in, t_loo_ok, u_loo[ok_loo])
+                    v_gt_i = np.interp(tp_in, t_loo_ok, v_loo[ok_loo])
+
+                    z_err  = np.abs(zout[within] - z_gt_i)
+                    uv_err = np.sqrt(
+                        0.5 * ((uout[within] - u_gt_i) ** 2 +
+                               (vout[within] - v_gt_i) ** 2)
+                    )
+
+                    all_horizons_z.extend(horizons.tolist())
+                    all_z_errors.extend(z_err.tolist())
+                    all_horizons_uv.extend(horizons.tolist())
+                    all_uv_errors.extend(uv_err.tolist())
+
+                    # xcorr lag on z
+                    try:
+                        from scipy.signal import correlate
+                        n_sig = len(zout[within])
+                        xc    = correlate(
+                            zout[within] - np.mean(zout[within]),
+                            z_gt_i - np.mean(z_gt_i),
+                            mode='full',
+                        )
+                        lags  = np.arange(-(n_sig - 1), n_sig)
+                        lag_s = float(lags[np.argmax(xc)]) / fs
+                        all_xcorr_lags.append(lag_s)
+                    except Exception:
+                        pass
+
+                    # peak timing error
+                    try:
+                        from scipy.signal import find_peaks
+                        pk_pred, _ = find_peaks(zout[within])
+                        pk_gt,   _ = find_peaks(z_gt_i)
+                        if pk_pred.size > 0 and pk_gt.size > 0:
+                            for pp in pk_pred:
+                                nearest = pk_gt[np.argmin(np.abs(pk_gt - pp))]
+                                all_peak_errors.append(
+                                    float(tp_in[pp] - tp_in[nearest])
+                                )
+                        all_npeak_diffs.append(int(pk_pred.size) - int(pk_gt.size))
+                    except Exception:
+                        pass
+
+            # --- Fig 1: animation plots ---------------------------------
+            for ax in axes_fig1:
                 ax.cla()
 
             colors = (
@@ -510,36 +536,110 @@ def main():
             ax_v_rc.set_xlabel('t [s]')
             apply_latched_ylim(ax_v_rc, 'v_recon', vr)
 
-            # Prediction panels: python prediction vs LOO ground truth (+ optional MATLAB)
-            ax_z_pr.plot(tpred, zout, 'k',   label='predicted')
-            ax_z_pr.plot(tpred, z_gt, color='limegreen', lw=1.5, label=f'{loo_label} measured')
-            if matlab_tpred is not None:
-                ax_z_pr.plot(matlab_tpred, matlab_z, color='steelblue', lw=1.0, ls='--', label='matlab')
+            # Prediction panels: LOO segment spanning input+prediction window (green) + prediction (black)
+            loo_win = (t_loo >= t_start) & (t_loo <= tpred[-1])
+            t_loo_w = t_loo[loo_win]
+            z_loo_w = z_loo[loo_win]
+            u_loo_w = u_loo[loo_win]
+            v_loo_w = v_loo[loo_win]
+
+            ax_z_pr.plot(t_loo_w, z_loo_w, color='limegreen', lw=1.0,
+                         label=f'{loo_label} measured')
+            ax_z_pr.plot(tpred, zout, 'k', lw=1.5, label='predicted')
             ax_z_pr.set_ylabel('z pred [m]')
             ax_z_pr.legend(loc='best', fontsize='small')
-            z_lim = np.concatenate([zout, z_gt] + ([matlab_z] if matlab_z is not None else []))
-            apply_latched_ylim(ax_z_pr, 'z_pred', z_lim)
+            apply_latched_ylim(ax_z_pr, 'z_pred',
+                               np.concatenate([z_loo_w[np.isfinite(z_loo_w)], zout]))
 
-            ax_u_pr.plot(tpred, uout, 'k')
-            ax_u_pr.plot(tpred, u_gt, color='limegreen', lw=1.5)
-            if matlab_tpred is not None:
-                ax_u_pr.plot(matlab_tpred, matlab_u, color='steelblue', lw=1.0, ls='--')
+            ax_u_pr.plot(t_loo_w, u_loo_w, color='limegreen', lw=1.0)
+            ax_u_pr.plot(tpred, uout, 'k', lw=1.5)
             ax_u_pr.set_ylabel('u pred [m/s]')
-            u_lim = np.concatenate([uout, u_gt] + ([matlab_u] if matlab_u is not None else []))
-            apply_latched_ylim(ax_u_pr, 'u_pred', u_lim)
+            apply_latched_ylim(ax_u_pr, 'u_pred',
+                               np.concatenate([u_loo_w[np.isfinite(u_loo_w)], uout]))
 
-            ax_v_pr.plot(tpred, vout, 'k')
-            ax_v_pr.plot(tpred, v_gt, color='limegreen', lw=1.5)
-            if matlab_tpred is not None:
-                ax_v_pr.plot(matlab_tpred, matlab_v, color='steelblue', lw=1.0, ls='--')
+            ax_v_pr.plot(t_loo_w, v_loo_w, color='limegreen', lw=1.0)
+            ax_v_pr.plot(tpred, vout, 'k', lw=1.5)
             ax_v_pr.set_ylabel('v pred [m/s]')
             ax_v_pr.set_xlabel('t [s]')
-            v_lim = np.concatenate([vout, v_gt] + ([matlab_v] if matlab_v is not None else []))
-            apply_latched_ylim(ax_v_pr, 'v_pred', v_lim)
+            apply_latched_ylim(ax_v_pr, 'v_pred',
+                               np.concatenate([v_loo_w[np.isfinite(v_loo_w)], vout]))
 
-            fig.suptitle(
+            fig1.suptitle(
                 f'LOO={loo_label}  t=[{t_start:.0f},{t_end:.0f}]s  '
                 f'horizon={n_lead}s  ct={comp_time:.3f}s',
+                fontsize=9,
+            )
+
+            # --- Fig 2: study-style summary (accumulated) ---------------
+            # Only clear error/metric panels (row 0 is sticky)
+            for ax in [ax_z_err, ax_uv_err, ax_ct, ax_xcorr, ax_peak, ax_npeak]:
+                ax.cla()
+
+            # Row 0: append black prediction window (green LOO line drawn once outside loop)
+            ax_z_ts.plot(tpred, zout, 'k', lw=0.8, alpha=0.4)
+            ax_u_ts.plot(tpred, uout, 'k', lw=0.8, alpha=0.4)
+            ax_v_ts.plot(tpred, vout, 'k', lw=0.8, alpha=0.4)
+
+            # Row 1: error vs horizon
+            if all_horizons_z:
+                hz = np.asarray(all_horizons_z)
+                ez = np.asarray(all_z_errors)
+                ax_z_err.scatter(hz, ez, s=4, color='steelblue', alpha=0.3)
+                sort_idx = np.argsort(hz)
+                k = min(50, len(ez))
+                ax_z_err.plot(hz[sort_idx],
+                              np.convolve(ez[sort_idx], np.ones(k) / k, mode='same'),
+                              color='steelblue', lw=1.5, label=f'iter={max_iter}')
+                ax_z_err.legend(loc='best', fontsize='small')
+            ax_z_err.set_xlabel('prediction horizon [s]')
+            ax_z_err.set_ylabel('|z error| [m]')
+            ax_z_err.set_title('z prediction error vs horizon', fontsize=9)
+
+            if all_horizons_uv:
+                huv = np.asarray(all_horizons_uv)
+                euv = np.asarray(all_uv_errors)
+                ax_uv_err.scatter(huv, euv, s=4, color='steelblue', alpha=0.3)
+                sort_idx = np.argsort(huv)
+                k = min(50, len(euv))
+                ax_uv_err.plot(huv[sort_idx],
+                               np.convolve(euv[sort_idx], np.ones(k) / k, mode='same'),
+                               color='steelblue', lw=1.5)
+            ax_uv_err.set_xlabel('prediction horizon [s]')
+            ax_uv_err.set_ylabel('RMS(u,v) error [m/s]')
+            ax_uv_err.set_title('u+v prediction error vs horizon', fontsize=9)
+
+            if all_comp_times:
+                ax_ct.boxplot([all_comp_times], positions=[1],
+                              widths=0.4, patch_artist=True,
+                              boxprops=dict(facecolor='steelblue', alpha=0.5),
+                              medianprops=dict(color='k', lw=1.5))
+                ax_ct.set_xticks([1])
+                ax_ct.set_xticklabels([str(max_iter)])
+            ax_ct.set_ylabel('solve time [s]')
+            ax_ct.set_xlabel('max_iter')
+            ax_ct.set_title('solve time per window', fontsize=9)
+
+            # Row 2: distribution plots
+            for ax, data, title, ylabel in [
+                (ax_xcorr, all_xcorr_lags,  'xcorr lag (+ = prediction early)', 'lag [s]'),
+                (ax_peak,  all_peak_errors, 'peak/trough timing error',          '\u0394t peak [s]'),
+                (ax_npeak, all_npeak_diffs, 'peak count diff vs reference',      '\u0394n peaks'),
+            ]:
+                if len(data) > 1:
+                    ax.violinplot([data], positions=[1],
+                                  showmedians=True, showextrema=True)
+                elif len(data) == 1:
+                    ax.plot([1], data, 'ko', markersize=5)
+                ax.axhline(0, color='k', lw=0.8, ls='--')
+                ax.set_title(title, fontsize=9)
+                ax.set_ylabel(ylabel)
+                ax.set_xlabel('max_iter')
+                ax.set_xticks([1])
+                ax.set_xticklabels([str(max_iter)])
+
+            fig2.suptitle(
+                f'LOO={loo_label}  error summary  '
+                f'(windows processed: {len(all_comp_times)})',
                 fontsize=9,
             )
 
@@ -549,14 +649,14 @@ def main():
                 plt.pause(0.001)
 
     if writer is not None:
-        with writer.saving(fig, str(movie_path), dpi=args.dpi):
+        with writer.saving(fig1, str(movie_path), dpi=args.dpi):
             run_loop(grab_frame=True)
     else:
         run_loop(grab_frame=False)
 
     all_preds.to_netcdf(f'loo_{loo_label}_predictions.nc')
-    if matlab_ds is not None:
-        matlab_ds.close()
+    plt.ioff()
+    plt.show()
 
 
 if __name__ == '__main__':

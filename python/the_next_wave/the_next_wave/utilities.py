@@ -14,54 +14,21 @@ Unless explicitly documented otherwise, this code assumes a local Cartesian fram
 - $u$ is East (m/s)
 - $v$ is North (m/s)
 
-Important: `rotation_deg` rotates the *projected x/y coordinates* (clockwise-positive).
-The current pipeline does not automatically rotate (u,v) when `rotation_deg != 0`, so
-keep `rotation_deg = 0` unless you also rotate velocities consistently.
+Coordinate transform
+--------------------
+``generic_coordinate_transform`` is a direct port of ``GenericCoordinateTransform.m``
+(SWIFT codes repo, S. Kastner 7/2016 / J. Thomson 1/2011) using a flat-earth
+approximation. **Use ``rotation_deg=180``** (the MATLAB standard) to get
+x=+East / y=+North.  The forward and inverse transforms are algebraically
+consistent with each other and with the MATLAB source.
 
 Reusable functions extracted from example.py for use in the_next_wave_node.py and other modules.
 """
 
 import numpy as np
-import utm
 
 from .swift import WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
-
-try:
-    from pyproj import CRS, Transformer
-
-    HAS_PYPROJ = True
-except Exception:  # pragma: no cover
-    CRS = None
-    Transformer = None
-    HAS_PYPROJ = False
-
-UTM_TRANSFORMER_CACHE: dict[tuple[int, bool], tuple[object, object]] = {}
-
-
-def get_pyproj_utm_transformers(zone_num: int, northern: bool):
-    """
-    Return (fwd, inv) pyproj Transformers for WGS84<->UTM zone.
-
-    Uses EPSG:
-      - 326xx for northern hemisphere
-      - 327xx for southern hemisphere
-    """
-    key = (int(zone_num), bool(northern))
-    cached = UTM_TRANSFORMER_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    if not HAS_PYPROJ:
-        raise RuntimeError('pyproj not available')
-
-    crs_ll = CRS.from_epsg(4326)
-    epsg = (32600 + int(zone_num)) if northern else (32700 + int(zone_num))
-    crs_utm = CRS.from_epsg(epsg)
-    fwd = Transformer.from_crs(crs_ll, crs_utm, always_xy=True)
-    inv = Transformer.from_crs(crs_utm, crs_ll, always_xy=True)
-    UTM_TRANSFORMER_CACHE[key] = (fwd, inv)
-    return fwd, inv
 
 
 def as_1d(a) -> np.ndarray:
@@ -154,135 +121,100 @@ def load_raw_sbg_arrays(
 
 def generic_coordinate_transform(lat, lon, lat0, lon0, rotation_deg):
     """
-    Convert lat/lon coordinates to local x/y using UTM with rotation.
+    Convert lat/lon coordinates to local x/y.
+
+    Direct port of ``GenericCoordinateTransform.m`` (SWIFT codes repo,
+    S. Kastner 7/2016 / J. Thomson 1/2011). Uses flat-earth approximation
+    with local Earth radius at ``lat0``, matching the MATLAB convention exactly.
 
     Parameters
     ----------
     lat, lon : array-like
-        Latitude and longitude in degrees
+        Latitude and longitude in degrees.
     lat0, lon0 : float
-        Reference latitude and longitude in degrees
+        Reference latitude and longitude in degrees (local origin).
     rotation_deg : float
-        Rotation angle in degrees (clockwise positive). When `rotation_deg == 0`, the
-        returned x/y are East/North offsets in meters. When nonzero, the returned x/y are
-        in a rotated local frame (and are no longer East/North).
+        Rotation of the local coordinate system in degrees CCW from True North
+        (MATLAB convention). The standard value for this codebase is 180, which
+        gives x=+East / y=+North — identical to the MATLAB output.
 
     Returns
     -------
     x, y : ndarray
-        Local Cartesian coordinates (meters). With `rotation_deg == 0`, x=East and y=North.
-        With `rotation_deg != 0`, x/y are rotated axes.
+        Local Cartesian coordinates in meters.
+        With ``rotation_deg=180``: x=East positive, y=North positive.
 
+    Notes
+    -----
+    MATLAB source (GenericCoordinateTransform.m)::
+
+        radius = 6371*cosd(latoffset);
+        north  = 1000*deg2km(lat - latoffset);
+        east   = 1000*deg2km(lonoffset - lon, radius);  % note: lonoffset-lon
+        x = east .* cosd(rotation) - north .* sind(rotation);
+        y = east .* sind(rotation) + north .* cosd(rotation);
+        y = -y;
     """
     lat = np.asarray(lat, dtype=float)
     lon = np.asarray(lon, dtype=float)
 
-    e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
+    # Flat-earth conversion constants (matches MATLAB deg2km)
+    DEG2M = np.pi / 180.0 * 6371.0 * 1000.0  # meters per degree (north-south)
+    radius_km = 6371.0 * np.cos(np.deg2rad(float(lat0)))  # local Earth radius [km]
+    DEG2M_EW = np.pi / 180.0 * radius_km * 1000.0  # meters per degree (east-west)
 
-    # Fast path: vectorized pyproj transform (dramatically faster than per-sample
-    # Python loop over utm.from_latlon). Fall back to utm if pyproj unavailable.
-    e = np.empty_like(lat, dtype=float)
-    n = np.empty_like(lat, dtype=float)
-    if HAS_PYPROJ:
-        try:
-            northern = bool(float(lat0) >= 0.0)
-            fwd, inv_unused = get_pyproj_utm_transformers(int(zone_num), northern)
-            lon_flat = np.asarray(lon, dtype=float).reshape((-1,))
-            lat_flat = np.asarray(lat, dtype=float).reshape((-1,))
-            e_flat, n_flat = fwd.transform(lon_flat, lat_flat)
-            e[:] = np.asarray(e_flat, dtype=float).reshape(lat.shape)
-            n[:] = np.asarray(n_flat, dtype=float).reshape(lat.shape)
-        except Exception:
-            for i in range(lat.size):
-                ei, ni, zn_unused, zl_unused = utm.from_latlon(
-                    float(lat.flat[i]), float(lon.flat[i])
-                )
-                e.flat[i] = ei
-                n.flat[i] = ni
-    else:
-        for i in range(lat.size):
-            ei, ni, zn_unused, zl_unused = utm.from_latlon(
-                float(lat.flat[i]), float(lon.flat[i])
-            )
-            e.flat[i] = ei
-            n.flat[i] = ni
+    # Local offsets in meters.
+    # MATLAB uses (lonoffset - lon) for east — sign convention preserved here.
+    north = (lat - float(lat0)) * DEG2M
+    east  = (float(lon0) - lon) * DEG2M_EW
 
-    dx = e - e0
-    dy = n - n0
+    c = np.cos(np.deg2rad(rotation_deg))
+    s = np.sin(np.deg2rad(rotation_deg))
 
-    ang = np.deg2rad(rotation_deg)
-    c = np.cos(ang)
-    s = np.sin(ang)
-
-    x = dx * c + dy * s
-    y = -dx * s + dy * c
+    x = east * c - north * s
+    y = -(east * s + north * c)  # MATLAB: y = -y
     return x, y
 
 
 def generic_coordinate_transform_inverse(x, y, lat0, lon0, rotation_deg):
     """
-    Convert local x/y coordinates back to lat/lon (inverse of generic_coordinate_transform).
+    Convert local x/y coordinates back to lat/lon.
+
+    Algebraic inverse of ``generic_coordinate_transform`` (MATLAB
+    GenericCoordinateTransform.m flat-earth port).
 
     Parameters
     ----------
     x, y : array-like
-        Local Cartesian coordinates (east, north) in meters
+        Local Cartesian coordinates in meters (same frame as the forward transform).
     lat0, lon0 : float
-        Reference latitude and longitude in degrees
+        Reference latitude and longitude in degrees.
     rotation_deg : float
-        Rotation angle in degrees (clockwise positive)
+        Rotation in degrees CCW from True North (same value used for the forward transform).
 
     Returns
     -------
     lat, lon : ndarray
-        Latitude and longitude in degrees
-
+        Latitude and longitude in degrees.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
 
-    # Undo rotation
-    ang = np.deg2rad(rotation_deg)
-    c = np.cos(ang)
-    s = np.sin(ang)
+    DEG2M = np.pi / 180.0 * 6371.0 * 1000.0
+    radius_km = 6371.0 * np.cos(np.deg2rad(float(lat0)))
+    DEG2M_EW = np.pi / 180.0 * radius_km * 1000.0
 
-    dx = x * c - y * s
-    dy = x * s + y * c
+    c = np.cos(np.deg2rad(rotation_deg))
+    s = np.sin(np.deg2rad(rotation_deg))
 
-    # Get reference UTM coordinates
-    e0, n0, zone_num, zone_let = utm.from_latlon(float(lat0), float(lon0))
+    # Invert: x  = east*c - north*s
+    #         -y = east*s + north*c  (because y = -(east*s + north*c))
+    # => [east; north] = R^T * [x; -y]  where R = [[c,-s],[s,c]]
+    east  =  x * c - y * s
+    north = -x * s - y * c
 
-    e = e0 + dx
-    n = n0 + dy
-
-    lat = np.empty_like(x, dtype=float)
-    lon = np.empty_like(x, dtype=float)
-    if HAS_PYPROJ:
-        try:
-            northern = bool(float(lat0) >= 0.0)
-            fwd_unused, inv = get_pyproj_utm_transformers(int(zone_num), northern)
-            e_flat = np.asarray(e, dtype=float).reshape((-1,))
-            n_flat = np.asarray(n, dtype=float).reshape((-1,))
-            lon_flat, lat_flat = inv.transform(e_flat, n_flat)
-            lat[:] = np.asarray(lat_flat, dtype=float).reshape(x.shape)
-            lon[:] = np.asarray(lon_flat, dtype=float).reshape(x.shape)
-        except Exception:
-            for i in range(x.size):
-                lat.flat[i], lon.flat[i] = utm.to_latlon(
-                    float(e.flat[i]),
-                    float(n.flat[i]),
-                    zone_num,
-                    zone_let,
-                )
-    else:
-        for i in range(x.size):
-            lat.flat[i], lon.flat[i] = utm.to_latlon(
-                float(e.flat[i]),
-                float(n.flat[i]),
-                zone_num,
-                zone_let,
-            )
-
+    lat = float(lat0) + north / DEG2M
+    lon = float(lon0) - east  / DEG2M_EW
     return lat, lon
 
 
@@ -318,15 +250,21 @@ def build_wavespec_from_swifts(
     Returns
     -------
     ws : WaveSpec
-        Averaged directional spectrum across all SWIFT buoys
+        Averaged directional spectrum across all SWIFT buoys.
+        ``ws.dir`` is populated with the per-frequency dominant direction
+        (compass degrees True, FROM convention) averaged across buoys using
+        circular mean — matching the MATLAB ``dir`` vector from
+        ``SWIFTdirectionalspectra`` (derived from ``atan2(b1,a1)``).
 
     """
     Ethetas = []
+    Es = []    # per-buoy 1D energy spectra E(f) direct from SWIFTdirectionalspectra
+    dirs = []  # per-buoy per-frequency direction arrays (from atan2(b1,a1))
     theta0 = None
     f0 = None
 
     for sw in swifts:
-        Etheta, theta, E, f, unused_1, spread, spread2, unused_2 = SWIFTdirectionalspectra(
+        Etheta, theta, E, f, dir_deg, spread, spread2, unused_2 = SWIFTdirectionalspectra(
             sw,
             plotflag=False,
             recip=recip,
@@ -334,8 +272,10 @@ def build_wavespec_from_swifts(
         )
 
         Etheta = np.asarray(Etheta, dtype=float)
+        E = np.asarray(E, dtype=float).ravel()
         f = np.asarray(f, dtype=float).ravel()
         theta = np.asarray(theta, dtype=float).ravel()
+        dir_deg = np.asarray(dir_deg, dtype=float).ravel()
 
         # Accept only finite, non-negative, non-zero-energy spectra.
         if Etheta.size == 0 or f.size == 0 or theta.size == 0:
@@ -347,6 +287,8 @@ def build_wavespec_from_swifts(
             continue
 
         Ethetas.append(Etheta)
+        Es.append(E)
+        dirs.append(dir_deg)
         if theta0 is None:
             theta0 = theta.copy()
             f0 = f.copy()
@@ -358,9 +300,28 @@ def build_wavespec_from_swifts(
         ws.Etheta = np.array([[]], dtype=float)
         ws.theta = np.array([], dtype=float)
         ws.f = np.array([], dtype=float)
+        ws.E = np.array([], dtype=float)
+        ws.dir = np.array([], dtype=float)
         return ws
 
     ws.Etheta = np.nanmean(np.stack(Ethetas, axis=2), axis=2)
+
+    # Average 1D energy spectra directly — this is the MATLAB E(f) from
+    # run_LS_prediction_SWIFTS.m: E = mean(E, 2) across buoys.
+    # Using ws.E for Hs/Tp avoids the theta-integration scaling error.
+    ws.E = np.nanmean(np.stack(Es, axis=1), axis=1)
+
+    # Average per-frequency directions across buoys using circular mean to
+    # handle the 0/360 wrap correctly.  This is the Python equivalent of MATLAB
+    # ``dir`` at each frequency (from atan2(b1,a1) in SWIFTdirectionalspectra).
+    if dirs:
+        dir_stack = np.stack(dirs, axis=1)  # (nfreq, nbuoys)
+        sin_mean = np.nanmean(np.sin(np.deg2rad(dir_stack)), axis=1)
+        cos_mean = np.nanmean(np.cos(np.deg2rad(dir_stack)), axis=1)
+        ws.dir = np.rad2deg(np.arctan2(sin_mean, cos_mean)) % 360.0
+    else:
+        ws.dir = np.array([], dtype=float)
+
     return ws
 
 
@@ -443,6 +404,16 @@ def bulk_wave_params_from_1d_spectrum(
     Compute a few standard bulk parameters from a 1D spectrum.
 
     Assumes E(f) is in units of m^2/Hz and f is in Hz.
+
+    Hs uses the MATLAB rectangular-sum method::
+
+        Hs = 4 * sqrt(sum(E(I) .* df))     % SWIFTdirectionalspectra.m
+
+    where ``df = median(diff(f))`` and I are the valid (E>0, finite) indices.
+    This matches MATLAB exactly; it differs from the trapezoidal rule by O(df^2).
+
+    Tm01 and Tm02 use trapezoidal integration (Python addition, no MATLAB eqivalent
+    in this repo) for better accuracy over unevenly-spaced frequency grids.
     """
     f = np.asarray(f_hz, dtype=float).ravel()
     E = np.asarray(E_m2_per_hz, dtype=float).ravel()
@@ -463,15 +434,22 @@ def bulk_wave_params_from_1d_spectrum(
     f = f[order]
     E = E[order]
 
+    # --- Hs: MATLAB method (SWIFTdirectionalspectra.m line 78) ---
+    # Hs = 4 * sqrt(sum(E(I).*df))  where df = median(diff(f))
+    df = float(np.nanmedian(np.diff(f))) if f.size > 1 else 1.0
+    m0_sum = float(np.sum(E * df))
+    Hs = 4.0 * np.sqrt(m0_sum) if np.isfinite(m0_sum) and m0_sum > 0.0 else float('nan')
+
+    # --- Tp: peak at argmax(E), matches MATLAB SBGWaves.m ---
+    i_peak = int(np.nanargmax(E)) if np.isfinite(E).any() else 0
+    fp = float(f[i_peak]) if f.size else float('nan')
+    Tp = 1.0 / fp if np.isfinite(fp) and fp > 0.0 else float('nan')
+
+    # --- Tm01, Tm02: trapezoidal spectral moments (Python addition) ---
     # NumPy 2.x: np.trapz was removed; use np.trapezoid instead.
     m0 = float(np.trapezoid(E, f))
     m1 = float(np.trapezoid(f * E, f))
     m2 = float(np.trapezoid((f**2) * E, f))
-    Hs = 4.0 * np.sqrt(m0) if np.isfinite(m0) and m0 > 0.0 else float('nan')
-
-    i_peak = int(np.nanargmax(E)) if np.isfinite(E).any() else 0
-    fp = float(f[i_peak]) if f.size else float('nan')
-    Tp = 1.0 / fp if np.isfinite(fp) and fp > 0.0 else float('nan')
 
     Tm01 = (m0 / m1) if np.isfinite(m0) and np.isfinite(m1) and m1 > 0.0 else float('nan')
     Tm02 = (
@@ -494,13 +472,34 @@ def bulk_dir_params_from_Etheta(
     f_hz: np.ndarray,
     theta_deg: np.ndarray,
     Etheta: np.ndarray,
+    *,
+    dir_freqband: np.ndarray,
 ) -> dict:
     """
     Compute peak/mean direction and a simple spread estimate from Etheta.
 
-    Uses circular moments of the energy-weighted directional distribution.
-    Theta is assumed in *compass degrees True* (0°=North, 90°=East), and represents
-    the direction waves are coming FROM (as produced by SWIFTdirectionalspectra).
+    Parameters
+    ----------
+    f_hz, theta_deg, Etheta : array-like
+        Directional spectrum inputs from SWIFTdirectionalspectra.
+        ``theta_deg`` is compass degrees True, direction waves come FROM.
+    dir_freqband : ndarray (nfreq,)
+        Per-frequency dominant direction [deg compass True] directly from
+        ``SWIFTdirectionalspectra`` (i.e. the ``atan2(b1,a1)``-derived ``dir``
+        vector, stored in ``WaveSpec.dir`` by ``build_wavespec_from_swifts``).
+
+        Dp and Dm match the MATLAB implementations:
+
+        - ``Dp = dir[fpindex]`` as in ``SBGWaves.m`` line 249.
+        - ``Dm`` computed as energy-weighted circular mean of ``dir_freqband``,
+          equivalent to
+          ``atan2d(trapz(f,E*a1)/trapz(f,E), trapz(f,E*b1)/trapz(f,E))``
+          from ``run_LS_prediction_SWIFTS.m`` (where a1=sin(dir), b1=cos(dir)
+          in compass convention).
+
+    Returns
+    -------
+    dict with keys ``Dp_deg``, ``Dm_deg``, ``spreadp_deg``.
     """
     f = np.asarray(f_hz, dtype=float).ravel()
     theta = np.asarray(theta_deg, dtype=float).ravel()
@@ -521,11 +520,8 @@ def bulk_dir_params_from_Etheta(
     dtheta = float(dtheta_deg * (np.pi / 180.0))
     theta_rad = np.deg2rad(theta)
 
-    # Nautical/compass directions are measured clockwise from North.
-    # Represent each direction as an EN unit vector:
-    #   east  = sin(theta)
-    #   north = cos(theta)
-    east = np.sin(theta_rad)
+    # Nautical/compass unit vectors:  east=sin(theta),  north=cos(theta)
+    east  = np.sin(theta_rad)
     north = np.cos(theta_rad)
 
     # 1D energy spectrum (m^2/Hz): integrate directional density over theta
@@ -535,38 +531,64 @@ def bulk_dir_params_from_Etheta(
 
     i_peak = int(np.nanargmax(E))
 
-    # Peak-direction moments
+    # ----------------------------------------------------------------
+    # MATLAB-faithful Dp/Dm using the raw atan2(b1,a1)-derived direction
+    # ----------------------------------------------------------------
+    d = np.asarray(dir_freqband, dtype=float).ravel()
+
+    # Dp = dir(fpindex)  -- SBGWaves.m line 249
+    if d.size == f.size and np.isfinite(d[i_peak]):
+        Dp = wrap_360(float(d[i_peak]))
+    else:
+        Dp = float('nan')
+
+    # Spread at peak frequency: still from Etheta (MATLAB SBGWaves.m uses
+    # `spread1 = sqrt(2*(1-sqrt(a1^2+b1^2)))` which is equivalent)
     w_peak = S[i_peak, :] * dtheta
     denom_peak = float(np.nansum(w_peak))
-    if not np.isfinite(denom_peak) or denom_peak <= 0.0:
-        Dp = float('nan')
-        spreadp = float('nan')
-    else:
+    if np.isfinite(denom_peak) and denom_peak > 0.0:
         mean_e = float(np.nansum(w_peak * east) / denom_peak)
         mean_n = float(np.nansum(w_peak * north) / denom_peak)
-        # Heading in compass degrees: atan2(east, north)
-        Dp = wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
         R = float(np.hypot(mean_e, mean_n))
         spreadp = float(np.rad2deg(np.sqrt(max(0.0, 2.0 * (1.0 - R)))))
-
-    # Mean direction across all frequencies, energy-weighted
-    df = np.diff(f)
-    df = np.concatenate([df, df[-1:]]) if df.size else np.array([1.0])
-    df = df.reshape((-1, 1))
-    w_all = S * dtheta * df
-    denom_all = float(np.nansum(w_all))
-    if not np.isfinite(denom_all) or denom_all <= 0.0:
-        Dm = float('nan')
     else:
-        mean_e = float(np.nansum(w_all * east.reshape((1, -1))) / denom_all)
-        mean_n = float(np.nansum(w_all * north.reshape((1, -1))) / denom_all)
-        Dm = wrap_360(np.rad2deg(np.arctan2(mean_e, mean_n)))
+        spreadp = float('nan')
+
+    # Dm: energy-weighted circular mean of dir_freqband across all freqs.
+    # Matches MATLAB run_LS_prediction_SWIFTS.m:
+    #   a1 = trapz(f, E.*sin(dir)) / trapz(f, E)   (a1 = east component)
+    #   b1 = trapz(f, E.*cos(dir)) / trapz(f, E)   (b1 = north component)
+    #   dmo = atan2d(a1, b1)
+    # Mask out frequency bins where dir is nan (e.g. zero-energy bins computed
+    # via np.where(E > 0, ..., nan)).  np.trapezoid propagates nan, so those
+    # bins must be excluded before integrating.
+    if d.size == f.size:
+        ok = np.isfinite(d)
+        if ok.any():
+            dir_rad = np.deg2rad(np.where(ok, d, 0.0))
+            E_ok    = np.where(ok, E, 0.0)
+            E_total = float(np.trapezoid(E_ok, f))
+            if np.isfinite(E_total) and E_total > 0.0:
+                a1_w = float(np.trapezoid(E_ok * np.sin(dir_rad), f)) / E_total
+                b1_w = float(np.trapezoid(E_ok * np.cos(dir_rad), f)) / E_total
+                Dm = wrap_360(float(np.rad2deg(np.arctan2(a1_w, b1_w))))
+            else:
+                Dm = float('nan')
+        else:
+            Dm = float('nan')
+    else:
+        Dm = float('nan')
 
     return {'Dp_deg': float(Dp), 'Dm_deg': float(Dm), 'spreadp_deg': float(spreadp)}
 
 
 def bulk_wave_params_from_wavespec(ws) -> dict:
-    """Compute bulk parameters from a WaveSpec (directional spectrum)."""
+    """Compute bulk parameters from a WaveSpec (directional spectrum).
+
+    Requires ``ws.E`` (1D energy spectrum from SWIFTdirectionalspectra) and
+    ``ws.dir`` (per-frequency direction from SWIFTdirectionalspectra), both
+    populated by ``build_wavespec_from_swifts``.
+    """
     f = np.asarray(getattr(ws, 'f', np.array([])), dtype=float).ravel()
     theta = np.asarray(getattr(ws, 'theta', np.array([])), dtype=float).ravel()
     S = np.asarray(getattr(ws, 'Etheta', np.array([[]])), dtype=float)
@@ -580,12 +602,15 @@ def bulk_wave_params_from_wavespec(ws) -> dict:
 
     if S.shape == (theta.size, f.size):
         S = S.T
-    dtheta_deg = float(np.nanmedian(np.diff(np.sort(theta)))) if theta.size > 1 else 1.0
-    dtheta = float(dtheta_deg * (np.pi / 180.0))
-    E = np.sum(S * dtheta, axis=1)
+
+    # ws.E: raw 1D energy spectrum direct from SWIFTdirectionalspectra.
+    # ws.dir: atan2(b1,a1)-derived per-frequency direction.
+    # Both are populated by build_wavespec_from_swifts — no fallback paths.
+    E = np.asarray(ws.E, dtype=float).ravel()
+    dir_freqband = np.asarray(ws.dir, dtype=float).ravel()
 
     out = dict(bulk_wave_params_from_1d_spectrum(f, E))
-    out.update(bulk_dir_params_from_Etheta(f, theta, S))
+    out.update(bulk_dir_params_from_Etheta(f, theta, S, dir_freqband=dir_freqband))
     return out
 
 
@@ -633,9 +658,11 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
     Notes on frames
     ---------------
     - Input velocities are taken as East/North from SBG (`vel_e`, `vel_n`).
-    - Positions are projected to local x/y using `generic_coordinate_transform`.
-    - If `rotation_deg != 0`, x/y are rotated but (u,v) are still East/North. To avoid
-      mixing frames, prefer `rotation_deg = 0` unless you also rotate (u,v) consistently.
+    - Positions are projected to local x/y using `generic_coordinate_transform`
+      (direct port of MATLAB ``GenericCoordinateTransform.m``).
+    - Use ``rotation=180`` (the MATLAB standard) to get x=+East / y=+North.
+      (u,v) remain in East/North regardless of rotation, matching the MATLAB
+      convention in ``run_example.m`` where velocities are not rotated.
 
     Supports both call signatures (for compatibility with `example.py`):
 
@@ -707,17 +734,6 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         lat = np.asarray(sbg.GpsPos.lat, dtype=float)
         lon = np.asarray(sbg.GpsPos.long, dtype=float)
 
-        # Optional cached absolute UTM coordinates (computed at ingest time).
-        # When present and aligned, these avoid re-projecting the full window.
-        east = None
-        north = None
-        try:
-            east = np.asarray(getattr(sbg.GpsPos, 'easting'), dtype=float)
-            north = np.asarray(getattr(sbg.GpsPos, 'northing'), dtype=float)
-        except Exception:
-            east = None
-            north = None
-
         if skipwarmup is not None or burstend is not None:
             start = int(skipwarmup) if skipwarmup is not None else 0
             stop = int(burstend) if burstend is not None else None
@@ -727,13 +743,8 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
             v = v[start:stop]
             lat = lat[start:stop]
             lon = lon[start:stop]
-            if east is not None and north is not None:
-                east = east[start:stop]
-                north = north[start:stop]
 
         n_local = int(min(z.size, ztime.size, u.size, v.size, lat.size, lon.size))
-        if east is not None and north is not None:
-            n_local = int(min(n_local, east.size, north.size))
         if n_local <= 0:
             continue
         if n_local != z.size:
@@ -749,38 +760,10 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
         if n_local != lon.size:
             lon = lon[:n_local]
 
-        if east is not None and north is not None:
-            if n_local != east.size:
-                east = east[:n_local]
-            if n_local != north.size:
-                north = north[:n_local]
-
-        # If cached UTM is present but mostly non-finite, ignore it.
-        if east is not None and north is not None:
-            try:
-                if int(np.count_nonzero(np.isfinite(east) & np.isfinite(north))) < max(
-                    1, int(0.9 * n_local)
-                ):
-                    east = None
-                    north = None
-            except Exception:
-                east = None
-                north = None
-
-        if east is not None and north is not None:
-            # Convert absolute UTM -> local x/y in meters relative to origin.
-            e0, n0, zone_num_unused, zone_let_unused = utm.from_latlon(
-                float(latorigin), float(lonorigin)
-            )
-            dx = np.asarray(east, dtype=float) - float(e0)
-            dy = np.asarray(north, dtype=float) - float(n0)
-            ang = np.deg2rad(rotation)
-            c = np.cos(ang)
-            s = np.sin(ang)
-            x = dx * c + dy * s
-            y = -dx * s + dy * c
-        else:
-            x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
+        # Convert lat/lon -> local x/y using the MATLAB GenericCoordinateTransform
+        # flat-earth formula (direct port).  With rotation=180 this gives x=+East,
+        # y=+North, matching the MATLAB run_example.m convention exactly.
+        x, y = generic_coordinate_transform(lat, lon, latorigin, lonorigin, rotation)
 
         x = np.asarray(x, dtype=float).reshape((-1,))
         y = np.asarray(y, dtype=float).reshape((-1,))
