@@ -5,6 +5,7 @@ description = "Deterministic ocean wave prediction from sparse buoy data. This m
 readme = "README.md"
 license = { text = "CC0-1.0" }
 maintainers = [{ name = "anderson", email = "anderson@mbari.org" }]
+
 # NOTE: "requires-python" is usually located here, but a workaround for a known ROS 2 bug:
 #
 #           https://github.com/colcon/colcon-python-setup-py/issues/33
@@ -12,9 +13,8 @@ maintainers = [{ name = "anderson", email = "anderson@mbari.org" }]
 #       requires this to be commented out. uv will complain with a warning, but you may ignore it as
 #       the ".python-version" file tells it which python version to use.
 #requires-python = ">=3.12"
+
 dependencies = [
-    "jax[cuda13]>=0.9.1",
-    "jaxopt>=0.8.5",
     "matplotlib>=3.10.8",
     "netcdf4>=1.7.4",
     "numpy>=2.4.2",
@@ -28,6 +28,21 @@ dependencies = [
     "xarray>=2026.1.0",
 ]
 
+[project.optional-dependencies]
+jax = [
+    # Desktop Linux + hosted CUDA 13 packages
+    "jax[cuda13]>=0.9.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+
+    # Jetson AGX Orin / aarch64 Linux
+    "jax==0.6.2; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "jaxlib==0.6.2.dev20260325; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "jax-cuda12-plugin==0.6.2.dev20260325; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "jax-cuda12-pjrt==0.6.2.dev20260325; sys_platform == 'linux' and platform_machine == 'aarch64'",
+
+    # Only when you opt into the JAX backend
+    "jaxopt>=0.8.5; sys_platform == 'linux'",
+]
+
 [project.scripts]
 the_next_wave_example = "the_next_wave.example:main"
 the_next_wave_example_study = "the_next_wave.example_study:main"
@@ -36,3 +51,30 @@ the_next_wave_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_sim_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_plotter_node = "the_next_wave.the_next_wave_plotter_node:main"
 the_next_wave_sbg_tcp_replay_node = "the_next_wave.sbg_tcp_replay_node:main"
+
+[[tool.uv.index]]
+name = "orin-jax"
+url = "https://andermi.github.io/jax-orin-wheels/simple/"
+explicit = true
+
+[tool.uv.sources]
+jaxlib = [
+    { index = "orin-jax", extra = "jax", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+jax-cuda12-plugin = [
+    { index = "orin-jax", extra = "jax", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+jax-cuda12-pjrt = [
+    { index = "orin-jax", extra = "jax", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.dependency-metadata]]
+name = "jax"
+version = "0.6.2"
+requires-dist = [
+    "jaxlib==0.6.2.dev20260325; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "ml_dtypes>=0.5.0",
+    "numpy>=1.26",
+    "opt_einsum",
+    "scipy>=1.12",
+]

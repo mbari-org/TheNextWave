@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import argparse
 from pathlib import Path
@@ -199,15 +199,22 @@ def plot_wavespec_comparison(
         """Format a scalar; return 'nan' if not finite."""
         return (format(v, spec) + (f' {unit}' if unit else '')) if np.isfinite(v) else 'nan'
 
-    mat_txt = (
-        f'Hs*      = {nf(Hs_mat,    ".3f", "m")}\n'
-        f'Tp*      = {nf(Tp_mat,    ".2f", "s")}\n'
-        f'Dp*      = {nf(Dp_mat,    ".1f", "\u00b0")}\n'
-        f'Dm*      = {nf(Dm_mat,    ".1f", "\u00b0")}\n'
-        f'spread@p*= {nf(spread_mat, ".1f", "\u00b0")}\n'
-        f'* reconstructed via \u222bEtheta d\u03b8_rad\n'
-        f'  (MATLAB used raw E(f), not saved here)'
-    )
+    deg = "\u00b0"
+    theta = "\u03b8"
+    int_symbol = "\u222b"
+    nl = chr(10)
+
+    mat_lines = [
+        f"Hs*      = {nf(Hs_mat, '.3f', 'm')}",
+        f"Tp*      = {nf(Tp_mat, '.2f', 's')}",
+        f"Dp*      = {nf(Dp_mat, '.1f', deg)}",
+        f"Dm*      = {nf(Dm_mat, '.1f', deg)}",
+        f"spread@p*= {nf(spread_mat, '.1f', deg)}",
+        f"* reconstructed via {int_symbol}Etheta d{theta}_rad",
+        "  (MATLAB used raw E(f), not saved here)",
+    ]
+    mat_txt = nl.join(mat_lines)
+
     ax_m1d.text(
         0.97, 0.95, mat_txt, transform=ax_m1d.transAxes,
         ha='right', va='top', fontsize=9, family='monospace',
@@ -220,13 +227,15 @@ def plot_wavespec_comparison(
     ax_p1d.set_title('Python  \u2014 mean of SWIFTs 22\u201325')
     ax_p1d.grid(True, alpha=0.3)
 
-    py_txt = (
-        f'Hs       = {nf(Hs_py,    ".3f", "m")}\n'
-        f'Tp       = {nf(Tp_py,    ".2f", "s")}\n'
-        f'Dp       = {nf(Dp_py,    ".1f", "\u00b0")}\n'
-        f'Dm       = {nf(Dm_py,    ".1f", "\u00b0")}\n'
-        f'spread@p = {nf(spread_py, ".1f", "\u00b0")}'
-    )
+    py_lines = [
+        f'Hs       = {nf(Hs_py,    ".3f", "m")}',
+        f'Tp       = {nf(Tp_py,    ".2f", "s")}',
+        f'Dp       = {nf(Dp_py,    ".1f", deg)}',
+        f'Dm       = {nf(Dm_py,    ".1f", deg)}',
+        f'spread@p = {nf(spread_py, ".1f", deg)}'
+    ]
+    py_txt = nl.join(py_lines)
+
     ax_p1d.text(
         0.97, 0.95, py_txt, transform=ax_p1d.transAxes,
         ha='right', va='top', fontsize=9, family='monospace',
@@ -239,13 +248,14 @@ def plot_wavespec_comparison(
     ax_s22_1d.set_title('Python  \u2014 SWIFT 22 only')
     ax_s22_1d.grid(True, alpha=0.3)
 
-    s22_txt = (
-        f'Hs       = {nf(Hs_s22,    ".3f", "m")}\n'
-        f'Tp       = {nf(Tp_s22,    ".2f", "s")}\n'
-        f'Dp       = {nf(Dp_s22,    ".1f", "\u00b0")}\n'
-        f'Dm       = {nf(Dm_s22,    ".1f", "\u00b0")}\n'
-        f'spread@p = {nf(spread_s22, ".1f", "\u00b0")}'
-    )
+    s22_lines = [
+        f'Hs       = {nf(Hs_s22,    ".3f", "m")}',
+        f'Tp       = {nf(Tp_s22,    ".2f", "s")}',
+        f'Dp       = {nf(Dp_s22,    ".1f", deg)}',
+        f'Dm       = {nf(Dm_s22,    ".1f", deg)}',
+        f'spread@p = {nf(spread_s22, ".1f", deg)}'
+    ]
+    s22_txt = nl.join(s22_lines)
     ax_s22_1d.text(
         0.97, 0.95, s22_txt, transform=ax_s22_1d.transAxes,
         ha='right', va='top', fontsize=9, family='monospace',
