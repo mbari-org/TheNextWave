@@ -57,16 +57,16 @@
 
 /sbg_tcp_replay_swift22:
   ros__parameters:
-    host: 127.0.0.1
+    host: spec
 
 /sbg_tcp_replay_swift23:
   ros__parameters:
-    host: 127.0.0.1
+    host: spec
 
 /sbg_tcp_replay_swift24:
   ros__parameters:
-    host: 127.0.0.1
+    host: spec
 
 /sbg_tcp_replay_swift25:
   ros__parameters:
-    host: 127.0.0.1
+    host: spec
