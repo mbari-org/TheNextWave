@@ -7,6 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.actions import LogInfo, SetLaunchConfiguration
+from launch.actions import SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
@@ -70,14 +71,36 @@ def resolve_gz_extra_args(context):
     return [SetLaunchConfiguration('gzsim_extra_gz_args', value)]
 
 
+def resolve_run_mode(context):
+    def to_bool(value: str) -> bool:
+        return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    replay_enabled = to_bool(LaunchConfiguration('enable_sbg_tcp_replay').perform(context))
+    bridge_enabled = to_bool(LaunchConfiguration('enable_sbg_bridge').perform(context))
+    nextwave_enabled = to_bool(LaunchConfiguration('enable_nextwave_node').perform(context))
+
+    if replay_enabled and not nextwave_enabled:
+        mode = 'replay_only'
+    elif bridge_enabled and (not replay_enabled) and nextwave_enabled:
+        mode = 'bridge_only'
+    elif (not replay_enabled) and (not bridge_enabled) and nextwave_enabled:
+        mode = 'full'
+    else:
+        mode = 'custom'
+
+    return [SetLaunchConfiguration('run_mode', mode)]
+
+
 def generate_launch_description() -> LaunchDescription:
     enable_plotter = LaunchConfiguration('enable_plotter')
+    enable_nextwave_node = LaunchConfiguration('enable_nextwave_node')
     enable_mbari_wec = LaunchConfiguration('enable_mbari_wec')
     enable_sbg_bridge = LaunchConfiguration('enable_sbg_bridge')
     enable_sbg_tcp_replay = LaunchConfiguration('enable_sbg_tcp_replay')
     params_file_override = LaunchConfiguration('params_file')
     selected_params_file = LaunchConfiguration('selected_params_file')
     selected_params_reason = LaunchConfiguration('selected_params_reason')
+    run_mode = LaunchConfiguration('run_mode')
     effective_params_file = LaunchConfiguration('effective_params_file')
     sbg_bridge_enable_effective = LaunchConfiguration('sbg_bridge_enable_effective')
     mbari_wec_enable_effective = LaunchConfiguration('mbari_wec_enable_effective')
@@ -125,6 +148,14 @@ def generate_launch_description() -> LaunchDescription:
                 'enable_plotter',
                 default_value='false',
                 description='If true, also run the standalone wave prediction plotter node.',
+            ),
+            DeclareLaunchArgument(
+                'enable_nextwave_node',
+                default_value='true',
+                description=(
+                    'If true, run the main the_next_wave_node. Set false when this machine '
+                    'should run only replay nodes.'
+                ),
             ),
             DeclareLaunchArgument(
                 'enable_mbari_wec',
@@ -227,6 +258,30 @@ def generate_launch_description() -> LaunchDescription:
                     NotEqualsSubstitution(LaunchConfiguration('params_file'), '')
                 ),
             ),
+            # Networked bridge/replay modes need inter-host DDS visibility.
+            SetEnvironmentVariable(
+                name='RMW_IMPLEMENTATION',
+                value='rmw_fastrtps_cpp',
+                condition=IfCondition(enable_sbg_bridge),
+            ),
+            SetEnvironmentVariable(
+                name='RMW_IMPLEMENTATION',
+                value='rmw_fastrtps_cpp',
+                condition=IfCondition(enable_sbg_tcp_replay),
+            ),
+            SetEnvironmentVariable(
+                name='ROS_LOCALHOST_ONLY',
+                value='0',
+                condition=IfCondition(enable_sbg_bridge),
+            ),
+            SetEnvironmentVariable(
+                name='ROS_LOCALHOST_ONLY',
+                value='0',
+                condition=IfCondition(enable_sbg_tcp_replay),
+            ),
+            # Derived launch role for operator visibility.
+            SetLaunchConfiguration('run_mode', 'custom'),
+            OpaqueFunction(function=resolve_run_mode),
             SetLaunchConfiguration('gzsim_extra_gz_args', '-r'),
             OpaqueFunction(function=resolve_gz_extra_args),
             # MBARI WEC launch: enabled by default unless explicitly disabled,
@@ -275,6 +330,29 @@ def generate_launch_description() -> LaunchDescription:
                     ')',
                 ]
             ),
+            LogInfo(
+                msg=[
+                    'the_next_wave: run_mode=',
+                    run_mode,
+                    ' (enable_nextwave_node=',
+                    enable_nextwave_node,
+                    ', sbg_bridge_enable_effective=',
+                    sbg_bridge_enable_effective,
+                    ', enable_sbg_tcp_replay=',
+                    enable_sbg_tcp_replay,
+                    ')',
+                ]
+            ),
+            LogInfo(
+                msg='the_next_wave: forcing DDS env for network mode: '
+                    'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                condition=IfCondition(enable_sbg_bridge),
+            ),
+            LogInfo(
+                msg='the_next_wave: forcing DDS env for network mode: '
+                    'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                condition=IfCondition(enable_sbg_tcp_replay),
+            ),
             # main predictor node
             Node(
                 package='the_next_wave',
@@ -292,6 +370,7 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                     },
                 ],
+                condition=IfCondition(enable_nextwave_node),
             ),
 
             # optional plotter node
