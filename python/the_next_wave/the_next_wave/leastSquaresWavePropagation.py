@@ -577,18 +577,14 @@ def leastSquaresWavePropagation(
     theta_u = unique_vals
     Etheta_u = Etheta[:, idx_last]
 
-    # shift by 180°, sort by that, and apply the same permutation to BOTH theta and Etheta.
-    # MATLAB gospel: after the TO-direction sort, wavespec.theta is NOT re-permuted —
-    # only Etheta is permuted.  theta_u_sorted therefore stays in the original
-    # unique-ascending (FROM-degrees) order.  DTp = theta_u_sorted[col_idx] then
-    # gives approximately the TO direction (same arithmetic as MATLAB), and
-    # kx = k*sin(theta), ky = k*cos(theta) with that TO-centered theta is correct.
+    # Shift by 180° into TO-direction frame, sort, and apply the same permutation
+    # to directional bins so theta/Etheta stay aligned for peak lookup/integration.
     t = theta_u + 180.0
     t[t > 360.0] -= 360.0
     I_sort = np.argsort(t)
 
-    theta_u_sorted = theta_u.copy()        # NOT permuted — matches MATLAB wavespec.theta
-    Etheta_u_sorted = Etheta_u[:, I_sort]  # permuted — matches MATLAB wavespec.Etheta
+    theta_u_sorted = t[I_sort]
+    Etheta_u_sorted = Etheta_u[:, I_sort]
 
     t_stage = prof_mark('spectrum_prep_s', t_stage)
 
@@ -600,6 +596,11 @@ def leastSquaresWavePropagation(
     DTp = np.deg2rad(theta_u_sorted[col_idx])  # radians
 
     f = f_in
+    # Use the local spacing between frequency bins instead of one fixed `df`.
+    # The source spectrum and the later log-spaced solve grid are not always
+    # evenly spaced, so treating every bin the same can bias the energy
+    # weighting. `np.gradient(f)` gives a simple per-bin width that keeps the
+    # 5 %-cutoff and later energy calculations matched to the actual binning.
     df = np.gradient(f)
 
     E_1d = trapz(Etheta_u_sorted.T, x=theta_u_sorted, axis=0)
@@ -630,7 +631,7 @@ def leastSquaresWavePropagation(
     theta = theta.flatten(order='F')
     # print(f'{theta=}')
 
-    # DTp ≈ TO direction (see theta_u_sorted comment above), so kx/ky follow MATLAB directly.
+    # DTp is in TO-centered frame, so kx/ky follow MATLAB directly.
     kx = np.outer(k, np.sin(theta))
     ky = np.outer(k, np.cos(theta))
     omega = np.outer(np.sqrt(9.81 * k), np.ones_like(theta))
@@ -685,13 +686,13 @@ def leastSquaresWavePropagation(
         Ei[np.isnan(Ei)] = 0.0
         t_stage = prof_mark('interp_griddata_s', t_stage)
 
-        Ei *= trapz(E_1d, x=f, axis=0) / trapz(
-            trapz(Ei, x=np.degrees(thet2[:, 0]), axis=0),
-            x=f2[0, :] / (2.0 * np.pi),
-            axis=0,
-        )
-        t_stage = prof_mark('interp_renorm_s', t_stage)
-
+        f2_hz = f2[0, :] / (2.0 * np.pi)
+        # Do the same thing on the interpolated grid. These frequency bins come
+        # from `logspace`, so they are not evenly spaced either. Using
+        # `np.gradient` here lets each amplitude use its own bin width, which
+        # keeps the total-energy rescaling and `sqrt(E * df * dtheta)` step
+        # consistent.
+        df2_hz = np.gradient(f2_hz)
         dtheta_mode_deg = (
             sps.mode(
                 np.diff(np.degrees(thet2[:, 0])),
@@ -701,8 +702,13 @@ def leastSquaresWavePropagation(
             .mode
             .item()
         )
-        df2 = np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
-        amps = np.sqrt(Ei * df2 * dtheta_mode_deg)
+        m0_src = trapz(E_1d, x=f, axis=0)
+        m0_tgt = float(np.sum(np.sum(Ei * df2_hz[np.newaxis, :], axis=1) * dtheta_mode_deg))
+        if np.isfinite(m0_tgt) and m0_tgt > 0.0:
+            Ei *= (m0_src / m0_tgt)
+        t_stage = prof_mark('interp_renorm_s', t_stage)
+
+        amps = np.sqrt(Ei * df2_hz[np.newaxis, :] * dtheta_mode_deg)
         amps_base = amps.T.flatten(order='F')
         amps_base[np.isnan(amps_base)] = 0.0
         good = np.nonzero(amps_base != 0.0)[0]
@@ -1098,13 +1104,19 @@ def leastSquaresWavePropagation(
     params.Etheta = np.zeros_like(Ei.flatten(order='F')).T
     params.Etheta[good_base] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
     params.Etheta = params.Etheta.reshape((len(k), len(theta)), order='F').T
-    params.Etheta /= (
-        np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
-        * sps.mode(
+    dtheta_mode_deg = (
+        sps.mode(
             np.diff(np.degrees(thet2[:, 0])),
             axis=None,
             keepdims=False
         ).mode.item()
+    )
+    # Use the same per-bin scaling here so converting the solved amplitudes
+    # back to `params.Etheta` matches the earlier `* df * dtheta` step.
+    df2_hz = np.gradient(f2[0, :] / (2.0 * np.pi))
+    params.Etheta /= (
+        df2_hz
+        * dtheta_mode_deg
     )
 
     params.f = (f2[0, :] / (2.0 * np.pi)).flatten()
