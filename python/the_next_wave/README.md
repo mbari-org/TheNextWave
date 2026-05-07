@@ -48,6 +48,8 @@ source install/setup.bash
 ros2 run the_next_wave the_next_wave_example 
 ```
 
+To use a specific packaged dataset folder, add `--example-name <folder-name>`.
+
 To generate a video instead of plotting, add the `--movie out.mp4`
 argument.
 
@@ -67,6 +69,8 @@ In the current directory, run:
 uv sync
 uv run python -m the_next_wave.example
 ```
+
+To use a specific packaged dataset folder, add `--example-name <folder-name>`.
 
 To generate a video instead of plotting, add the `--movie out.mp4`
 argument.

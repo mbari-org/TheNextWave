@@ -325,6 +325,41 @@ def build_wavespec_from_swifts(
     return ws
 
 
+def build_wavespec_from_directional_spectrum(Etheta, theta_deg, f_hz) -> WaveSpec:
+    """Build a `WaveSpec` from directional spectrum arrays.
+
+    This is useful for loading saved `wavespec.mat` files that contain only
+    `Etheta`, `theta`, and `f`, and need the derived `E` and `dir` fields
+    reconstructed in the same format expected elsewhere in the Python port.
+    """
+    ws = WaveSpec()
+    ws.Etheta = np.asarray(Etheta, dtype=float)
+    ws.theta = np.asarray(theta_deg, dtype=float).ravel()
+    ws.f = np.asarray(f_hz, dtype=float).ravel()
+
+    if ws.Etheta.shape == (ws.theta.size, ws.f.size):
+        ws.Etheta = ws.Etheta.T
+
+    if ws.Etheta.ndim != 2 or ws.Etheta.shape[0] != ws.f.size:
+        raise ValueError(
+            f'Unexpected wavespec shape {ws.Etheta.shape}; expected (nf, ntheta)'
+        )
+
+    theta_rad = np.deg2rad(ws.theta)
+    ws.E = np.trapezoid(ws.Etheta, x=theta_rad, axis=1)
+
+    sin_theta = np.sin(theta_rad)[np.newaxis, :]
+    cos_theta = np.cos(theta_rad)[np.newaxis, :]
+    numer_sin = np.trapezoid(ws.Etheta * sin_theta, x=theta_rad, axis=1)
+    numer_cos = np.trapezoid(ws.Etheta * cos_theta, x=theta_rad, axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        a1 = np.where(ws.E > 0.0, numer_sin / ws.E, np.nan)
+        b1 = np.where(ws.E > 0.0, numer_cos / ws.E, np.nan)
+    ws.dir = np.mod(np.rad2deg(np.arctan2(a1, b1)), 360.0)
+
+    return ws
+
+
 def centroid_period_and_phase_speed(ws):
     """
     Compute centroid period and phase speed from wave spectrum.
