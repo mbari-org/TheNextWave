@@ -18,12 +18,13 @@ except ImportError:
 JIT_CACHE: dict = {}
 
 
-def get_jit_solve(n_rows: int, n_cols: int, max_iter: int):
-    key = (int(n_rows), int(n_cols), int(max_iter))
+def get_jit_solve(n_rows: int, n_cols: int, max_iter: int, gtol: float):
+    key = (int(n_rows), int(n_cols), int(max_iter), float(gtol))
     if key in JIT_CACHE:
         return JIT_CACHE[key]
 
     max_iter_int = int(max_iter)
+    gtol_float = float(gtol)
 
     def solve(P_j, b_j, x0_j, lb_j, ub_j):
         def fun(x):
@@ -33,7 +34,7 @@ def get_jit_solve(n_rows: int, n_cols: int, max_iter: int):
         solver = jaxopt.LBFGSB(
             fun=fun,
             maxiter=max_iter_int,
-            tol=1e-5,
+            tol=gtol_float,
             linesearch='zoom',
             history_size=10,
             implicit_diff=False,
@@ -52,6 +53,7 @@ def solve_box_lbfgsb_jax(
     ub,
     x0=None,
     max_iter=80,
+    gtol=0.1,
     print_losses=False,
 ):
     if not JAX_AVAILABLE:
@@ -91,7 +93,8 @@ def solve_box_lbfgsb_jax(
     lb_j = jnp.array(lb, dtype=jnp.float32)
     ub_j = jnp.array(ub, dtype=jnp.float32)
 
-    jit_fn = get_jit_solve(P.shape[0], P.shape[1], int(max_iter))
+    gtol = float(gtol)
+    jit_fn = get_jit_solve(P.shape[0], P.shape[1], int(max_iter), gtol)
     result = jit_fn(P_j, b_j, x0_j, lb_j, ub_j)
 
     x = np.array(result.params, dtype=np.float64)
@@ -111,7 +114,7 @@ def solve_box_lbfgsb_jax(
     info.x = x
     info.nit = int(result.state.iter_num)
     info.fun = float(result.state.value)
-    info.success = bool(result.state.error < 1e-5)
+    info.success = bool(result.state.error <= gtol)
     info.status = 0 if info.success else 1
     info.message = (
         'CONVERGENCE: NORM_OF_PROJECTED_GRADIENT_<=_PGTOL'

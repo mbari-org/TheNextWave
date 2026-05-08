@@ -52,6 +52,7 @@ def solve_box_lbfgsb(
             np.asarray(ub, dtype=np.float64),
             x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
             max_iter=int(max_iter),
+            gtol=float(gtol),
             print_losses=bool(print_losses),
         )
 
@@ -64,6 +65,7 @@ def solve_box_lbfgsb(
             np.asarray(ub, dtype=np.float64),
             x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
             max_iter=int(max_iter),
+            gtol=float(gtol),
             print_losses=bool(print_losses),
         )
 
