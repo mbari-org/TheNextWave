@@ -77,12 +77,11 @@ def parse_args():
 
 
 A0 = None
-A0_indices = None
 all_preds = Prediction()
 
 
 def main():
-    global A0, A0_indices, all_preds
+    global A0, all_preds
 
     args = parse_args()
     loo_idx        = int(args.loo_idx)
@@ -290,7 +289,7 @@ def main():
     ax_v_ts.set_title('v timeseries', fontsize=9)
 
     def run_loop(grab_frame=False):
-        global A0, A0_indices, all_preds
+        global A0, all_preds
 
         for ti in range(0, n, step):
             inputwindow = ti + np.arange(win_len)
@@ -342,26 +341,11 @@ def main():
                 ws,
                 A0=A0,
                 max_iter=max_iter,
-                A0_active_indices=None,
                 solver_backend=solver_backend,
-                ridge=0.0,
-                use_spectrum_weighted_ridge=False,
-                spectrum_ridge_floor=1e-6,
                 diagnostics=True,
-                gtol=0.1,
-                lambda_time=0.0,
-                lambda_freq_smooth=0.0,
-                lambda_theta_smooth=0.0,
-                freq_energy_frac=0.0,
-                dir_energy_frac=0.0,
-                active_grid_pad=1,
                 print_losses=True,
-                use_rank_reduction=False,
-                use_row_scale=False,
-                use_col_scale=False,
             )
             A0 = params.A
-            A0_indices = params.active_good_indices
             print(f'  solve_time={comp_time:.3f}s')
 
             prediction     = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')

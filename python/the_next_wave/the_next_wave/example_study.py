@@ -485,22 +485,8 @@ def main():
                     ypred.reshape((-1, 1)),
                     ws,
                     A0=A0_list[iter_idx],
-                    A0_active_indices=None,
                     max_iter=mi,
                     solver_backend=solver_backend,
-                    ridge=0.0,
-                    use_spectrum_weighted_ridge=False,
-                    spectrum_ridge_floor=1e-6,
-                    gtol=0.1,
-                    lambda_time=0.0,
-                    lambda_freq_smooth=0.0,
-                    lambda_theta_smooth=0.0,
-                    freq_energy_frac=0.0,
-                    dir_energy_frac=0.0,
-                    active_grid_pad=1,
-                    use_rank_reduction=False,
-                    use_row_scale=False,
-                    use_col_scale=False,
                 )
                 A0_list[iter_idx] = params.A
                 print(f'  max_iter={mi:4d}  solve_time={comp_time:.3f}s')

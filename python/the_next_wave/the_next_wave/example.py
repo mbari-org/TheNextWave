@@ -333,12 +333,10 @@ def parse_args():
         '--solver-backend',
         type=str,
         default='auto',
-        choices=('auto', 'scipy', 'jax', 'trust-constr'),
-        help='Solver backend: auto (default, uses jax/GPU when available, else scipy), '
-             'jax (always use jax — warns if no GPU found), '
-             'scipy (always use scipy L-BFGS-B, fastest on CPU), '
-             'trust-constr (second-order trust-region with exact hessp; '
-             'converges reliably where L-BFGS-B stalls).',
+           choices=('auto', 'scipy', 'jax'),
+           help='Solver backend: auto (default, uses jax/GPU when available, else scipy), '
+               'jax (always use jax — warns if no GPU found), '
+               'scipy (always use scipy L-BFGS-B).',
     )
     p.add_argument(
         '--wavespec-swift',
@@ -362,7 +360,6 @@ def parse_args():
 
 
 A0 = None
-A0_indices = None
 all_preds = Prediction()
 max_iter = 5
 solver_backend = 'auto'
@@ -372,7 +369,6 @@ matlab_ti_offset_increment = 1  # iterative adjustment to offset
 
 def main():
     global A0
-    global A0_indices
     global all_preds
     global max_iter
     global solver_backend
@@ -626,7 +622,6 @@ def main():
 
     def run_loop(grab_frame=False):
         global A0
-        global A0_indices
         global all_preds
         global max_iter
         global solver_backend
@@ -751,26 +746,11 @@ def main():
                 ws,
                 A0=A0,
                 max_iter=max_iter,
-                A0_active_indices=None,  # A0_indices,
                 solver_backend=solver_backend,
-                ridge=0.0,  # set 0.0 to disable base ridge
-                use_spectrum_weighted_ridge=False,  # set True to enable spectrum-weighted ridge
-                spectrum_ridge_floor=1e-6,
                 diagnostics=True,
-                gtol=0.1,
-                lambda_time=0.0,  # 0.1,            # set 0.0 to disable temporal continuity loss
-                lambda_freq_smooth=0.0,  # 1e-3,    # set 0.0 to disable frequency smoothing loss
-                lambda_theta_smooth=0.0,   # 1e-3,   # set 0.0 to disable directional smoothing loss
-                freq_energy_frac=0.0,      # 0.05,  # set 0.0 to disable frequency active-grid pruning
-                dir_energy_frac=0.0,       # 0.10,  # set 0.0 to disable directional active-grid pruning
-                active_grid_pad=1,
                 print_losses=True,
-                use_rank_reduction=False,  # set True to try SVD compression (bounds approximate)
-                use_row_scale=False,        # set False to disable row conditioning
-                use_col_scale=False,        # set False to disable column conditioning
             )
             A0 = params.A
-            A0_indices = params.active_good_indices
             print(f'solve time = {comp_time:.2f}s  nit={params.solver_nit}/{max_iter}')
             prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
             zout = prediction[:, 0]
