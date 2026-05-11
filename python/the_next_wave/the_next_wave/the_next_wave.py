@@ -108,6 +108,12 @@ class TheNextWave:
         finite_energy = Etheta[np.isfinite(Etheta)]
         return finite_energy.size > 0 and float(np.nansum(finite_energy)) > 0.0
 
+    def reset_runtime_state(self) -> None:
+        """Clear cached state so the next processing pass fully recomputes from data."""
+        self.A0 = None
+        self.last_wavespec = None
+        self.last_wavespec_time_s = None
+
     def process(
         self,
         swifts: SWIFTArray,

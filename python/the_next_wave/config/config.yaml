@@ -5,7 +5,7 @@
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
-    rotation_deg: 180.0
+    rotation_deg: 0.0
     downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     # Only compute/publish dense_predictions_* for the last N seconds of the
@@ -23,7 +23,7 @@
     lsq_near_bound_ratio: 0.95
 
     # Optional MEM stabilization (disabled by default; diverges from MATLAB).
-    mem_moment_cap_enable: true
+    mem_moment_cap_enable: False
     mem_moment_cap: 0.999
 
     # Sim latent ingest noise floor (helps avoid MEM singularities on perfect waves).
@@ -53,6 +53,7 @@
       swift24: 3
       swift25: 4
 
+    # override wave_dir and swift_coords for testing/debugging (matches example_sim_params.yaml)
     wave_dir: 270.0  # 200.0
     swift_coords:
       x: [-125.0, -185.0, -100.0, 45.0]

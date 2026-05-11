@@ -146,6 +146,14 @@ class LivePlotter:
         self.profile_i = 0
         self.profile_ema_s: dict[str, float] = {}
 
+    def reset_runtime_state(self) -> None:
+        """Clear rolling verification and latched-axes state between runs."""
+        self.pending_z_forecasts_by_lead.clear()
+        self.latest_z_error_by_lead.clear()
+        self.z_err_median_abs_history.clear()
+        self.z_err_history_by_lead.clear()
+        self.latched_y_limits.clear()
+
     def profile_update(self, stage_s: dict[str, float]) -> None:
         """Update EMA timings and occasionally log a short breakdown."""
         if not self.profile_enabled:

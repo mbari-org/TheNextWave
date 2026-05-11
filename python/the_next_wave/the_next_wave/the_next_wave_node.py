@@ -422,11 +422,15 @@ class TheNextWaveNode(Interface):
 
             window_end_time = float(results.get('window_end_time', float('nan')))
             wec_hist_filtered = []
+            history_t_min = float('-inf')
+            if np.isfinite(window_end_time):
+                history_t_min = window_end_time - float(self.params.wec_actual_history_sec)
             if wec_actual_hist:
                 for p in wec_actual_hist:
                     t_s = float(p[0])
                     if np.isfinite(t_s) and (
-                        not np.isfinite(window_end_time) or t_s <= window_end_time
+                        (not np.isfinite(window_end_time) or t_s <= window_end_time)
+                        and t_s >= history_t_min
                     ):
                         wec_hist_filtered.append(
                             (float(p[0]), float(p[1]), float(p[2]), float(p[3]))
@@ -764,6 +768,27 @@ class TheNextWaveNode(Interface):
                 inc0 = data.inc_wave_heights[0]
                 t0_us = inc0.pose.header.stamp.sec * 1e6 + inc0.pose.header.stamp.nanosec / 1e3
                 t0_s = float(t0_us) / 1e6
+                prev_wec_t_s = None
+                if self.wec_actual_latest is not None:
+                    try:
+                        prev_wec_t_s = float(self.wec_actual_latest.get('t_s', float('nan')))
+                    except Exception:
+                        prev_wec_t_s = None
+
+                if (
+                    prev_wec_t_s is not None
+                    and np.isfinite(prev_wec_t_s)
+                    and np.isfinite(t0_s)
+                    and t0_s < (prev_wec_t_s - 1.0e-3)
+                ):
+                    self.get_logger().warn(
+                        'Time jumped backwards for WEC actual history: '
+                        f'prev={prev_wec_t_s:.6f} s new={t0_s:.6f} s; '
+                        'clearing WEC actual history and predictor caches.'
+                    )
+                    self.wec_actual_hist.clear()
+                    self.predictor.reset_runtime_state()
+
                 wec_sample = {
                     't_s': t0_s,
                     'z': float(inc0.pose.pose.position.z),
@@ -871,6 +896,7 @@ class TheNextWaveNode(Interface):
                 f'prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)'
             )
             # Drop all pre-jump samples so timestamps remain monotonic.
+            self.predictor.reset_runtime_state()
             self.reset_swift_window(swift_num)
             sbg = getattr(self.swifts, f'sbg{swift_num}')
 
