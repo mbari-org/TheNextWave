@@ -53,13 +53,23 @@
       swift24: 3
       swift25: 4
 
-    # override wave_dir and swift_coords for testing/debugging (matches example_sim_params.yaml)
+    # Optional simulator overrides for testing/debugging.
+    # These map onto mbari_wec empy launch inputs.
     wave_dir: 270.0  # 200.0
+
+    # SWIFT sample locations, mapped to empy `inc_wave_height_points`.
     swift_coords:
       x: [-125.0, -185.0, -100.0, 45.0]
       y: [-25.0, -115.0, -135.0, -175.0]
       # x: [-90.0, -37.0, -135.0, 8.0]
       # y: [-246.0, -103.0, -148.0, -201.0]
+
+    # Bretschneider incident wave settings, mapped to empy `inc_wave_spectrum`.
+    bretschneider:
+      Hs: 3.0
+      Tp: 14.0
+      n_phases: 500
+      spreading_deg: 22.0
 
 /the_next_wave_plotter_node:
   ros__parameters:

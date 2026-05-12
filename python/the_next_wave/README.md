@@ -140,13 +140,14 @@ ros2 launch the_next_wave the_next_wave.launch.py \
    params_file:=/absolute/path/to/my_config.yaml
 ```
 
-#### How to specify wave direction and SWIFT locations in ROS launch mode
+#### How to specify incident-wave overrides in ROS launch mode
 
 For the top-level TheNextWave launch, the simulator overrides are read from
 [config/config.yaml](config/config.yaml):
 
 - `wave_dir`: incident-wave direction in compass degrees True, waves coming **FROM**
-- `swift_coords.x` / `swift_coords.y`: the simulated SWIFT buoy sample locations in local meters
+- `swift_coords.x` / `swift_coords.y`: simulated SWIFT buoy sample locations in local meters; mapped to simulator `inc_wave_height_points`
+- `bretschneider`: Bretschneider incident-wave settings; mapped to simulator `inc_wave_spectrum`
 
 Example snippet:
 
@@ -157,15 +158,21 @@ Example snippet:
       swift_coords:
          x: [-125.0, -185.0, -100.0, 45.0]
          y: [-25.0, -115.0, -135.0, -175.0]
+      bretschneider:
+         Hs: 3.0
+         Tp: 14.0
+         n_phases: 500
+         spreading_deg: 22.0
 ```
 
 Those values are converted at launch time into the MBARI WEC simulator arguments
-`inc_wave_dir` and `inc_wave_height_points`.
+`inc_wave_dir`, `inc_wave_height_points`, and `inc_wave_spectrum`.
 
 #### How to specify directional spreading in ROS/Gazebo runs
 
-`spreading_deg` is a simulator setting, not a top-level `the_next_wave.launch.py`
-argument. Use one of these paths:
+`spreading_deg` is still a simulator setting, but the top-level TheNextWave launch
+now forwards it from `config/config.yaml` when provided through `bretschneider`.
+You can also use one of these paths:
 
 1. **Direct simulator launch** with [src/mbari_wec_gz/buoy_gazebo/launch/mbari_wec.launch.py](../../../../src/mbari_wec_gz/buoy_gazebo/launch/mbari_wec.launch.py):
 
