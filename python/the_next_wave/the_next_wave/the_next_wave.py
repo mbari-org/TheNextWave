@@ -66,14 +66,8 @@ class TheNextWaveConfig:
     enable_dense_history_projection: bool = True
 
     # Least-squares solver controls
-    lsq_ridge: float = 1e-6
     lsq_max_iter: int = 60
     lsq_solver_backend: str = 'auto'
-    # Use spectrum-derived per-component scale as a prior (MAP / weighted ridge).
-    # Default ON to discourage large cancelling coefficients that can blow up off-sensor.
-    lsq_use_spectrum_weighted_ridge: bool = True
-    lsq_spectrum_ridge_floor: float = 1e-6
-    # Optional diagnostics for constraint saturation.
     lsq_diagnostics_enable: bool = False
     lsq_near_bound_ratio: float = 0.95
 
@@ -113,6 +107,12 @@ class TheNextWave:
         # Require some positive finite energy to avoid 0/0 centroid period.
         finite_energy = Etheta[np.isfinite(Etheta)]
         return finite_energy.size > 0 and float(np.nansum(finite_energy)) > 0.0
+
+    def reset_runtime_state(self) -> None:
+        """Clear cached state so the next processing pass fully recomputes from data."""
+        self.A0 = None
+        self.last_wavespec = None
+        self.last_wavespec_time_s = None
 
     def process(
         self,
@@ -338,11 +338,8 @@ class TheNextWave:
             ypred.reshape((-1, 1)),
             ws,
             A0=self.A0,
-            ridge=float(self.config.lsq_ridge),
             max_iter=int(self.config.lsq_max_iter),
             solver_backend=str(self.config.lsq_solver_backend),
-            use_spectrum_weighted_ridge=bool(self.config.lsq_use_spectrum_weighted_ridge),
-            spectrum_ridge_floor=float(self.config.lsq_spectrum_ridge_floor),
             diagnostics=bool(self.config.lsq_diagnostics_enable),
             near_bound_ratio=float(self.config.lsq_near_bound_ratio),
             profiling=lsq_prof,

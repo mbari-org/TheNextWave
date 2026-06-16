@@ -7,145 +7,70 @@ import scipy.optimize as spo
 import scipy.stats as sps
 
 from .swift import LSQWavePropParams
-from .active_grid import build_active_grid_from_wavespec, expand_active_solution
 
 try:
-    from .solve_box_ridge_lbfgsb_jax import solve_box_ridge_lbfgsb_jax
+    from .solve_box_lbfgsb_jax import solve_box_lbfgsb_jax
 except Exception:
-    solve_box_ridge_lbfgsb_jax = None
+    solve_box_lbfgsb_jax = None
 
 trapz = getattr(np, 'trapz', np.trapezoid)
 
 
-def solve_box_ridge_lbfgsb(
+def solve_box_lbfgsb(
     P,
     b,
     lb,
     ub,
     x0=None,
-    ridge=1e-6,
     max_iter=80,
-    ridge_sigma_x=None,
     backend='auto',
     gtol=0.1,
-    good_indices=None,
-    grid_shape=None,
-    lambda_time=0.0,
-    lambda_freq_smooth=0.0,
-    lambda_theta_smooth=0.0,
     print_losses=False,
-    use_rank_reduction=False,
-    rank_tol=1e-3,
-    max_rank=None,
-    use_row_scale=True,
-    use_col_scale=True,
 ):
     """
-    Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub.
+    Solve: min 0.5||P x - b||^2  s.t. lb <= x <= ub.
 
-    Uses:
-      - row scaling (improves conditioning)
-      - column scaling (improves conditioning)
-      - scipy (default): L-BFGS-B, fast per-iteration, supports warm start
-      - trust-constr: second-order method with exact Hessian-vector products;
-        converges reliably when L-BFGS-B stalls on correlated components
-      - jax: L-BFGS-B on GPU via jaxopt
+    Uses either scipy L-BFGS-B or jaxopt L-BFGS-B.
     """
     backend_norm = str(backend).strip().lower()
-    if backend_norm not in {'auto', 'scipy', 'jax', 'trust-constr'}:
+    if backend_norm not in {'auto', 'scipy', 'jax'}:
         raise ValueError(
-            f"Invalid backend='{backend}'. Expected one of: auto, scipy, trust-constr, jax"
+            f"Invalid backend='{backend}'. Expected one of: auto, scipy, jax"
         )
 
     if backend_norm == 'jax':
-        if solve_box_ridge_lbfgsb_jax is None:
+        if solve_box_lbfgsb_jax is None:
             raise RuntimeError(
                 "backend='jax' requested but jax/jaxopt are not available.\n"
                 "  CPU-only:  pip install jax jaxopt\n"
                 "  CUDA 13:   pip install 'jax[cuda13]' jaxopt"
             )
-        return solve_box_ridge_lbfgsb_jax(
+        return solve_box_lbfgsb_jax(
             np.asarray(P, dtype=np.float64),
             np.asarray(b, dtype=np.float64),
             np.asarray(lb, dtype=np.float64),
             np.asarray(ub, dtype=np.float64),
             x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
-            ridge=float(ridge),
             max_iter=int(max_iter),
-            ridge_sigma_x=None
-            if ridge_sigma_x is None
-            else np.asarray(ridge_sigma_x, dtype=np.float64),
-            lambda_time=float(lambda_time),
-            lambda_freq_smooth=float(lambda_freq_smooth),
-            lambda_theta_smooth=float(lambda_theta_smooth),
-            good_indices=good_indices,
-            grid_shape=grid_shape,
+            gtol=float(gtol),
             print_losses=bool(print_losses),
-            use_rank_reduction=bool(use_rank_reduction),
-            rank_tol=float(rank_tol),
-            max_rank=max_rank if max_rank is None else int(max_rank),
-            use_row_scale=bool(use_row_scale),
-            use_col_scale=bool(use_col_scale),
         )
 
     # auto: prefer jax if available, else scipy
-    if backend_norm == 'auto' and solve_box_ridge_lbfgsb_jax is not None:
-        return solve_box_ridge_lbfgsb_jax(
+    if backend_norm == 'auto' and solve_box_lbfgsb_jax is not None:
+        return solve_box_lbfgsb_jax(
             np.asarray(P, dtype=np.float64),
             np.asarray(b, dtype=np.float64),
             np.asarray(lb, dtype=np.float64),
             np.asarray(ub, dtype=np.float64),
             x0=None if x0 is None else np.asarray(x0, dtype=np.float64),
-            ridge=float(ridge),
             max_iter=int(max_iter),
-            ridge_sigma_x=None
-            if ridge_sigma_x is None
-            else np.asarray(ridge_sigma_x, dtype=np.float64),
-            lambda_time=float(lambda_time),
-            lambda_freq_smooth=float(lambda_freq_smooth),
-            lambda_theta_smooth=float(lambda_theta_smooth),
-            good_indices=good_indices,
-            grid_shape=grid_shape,
-            print_losses=bool(print_losses),
-            use_rank_reduction=bool(use_rank_reduction),
-            rank_tol=float(rank_tol),
-            max_rank=max_rank if max_rank is None else int(max_rank),
-            use_row_scale=bool(use_row_scale),
-            use_col_scale=bool(use_col_scale),
-        )
-
-    if backend_norm == 'trust-constr':
-        return solve_box_ridge_trust_constr(
-            P, b, lb, ub,
-            x0=x0,
-            ridge=float(ridge),
-            max_iter=int(max_iter),
-            ridge_sigma_x=ridge_sigma_x,
             gtol=float(gtol),
+            print_losses=bool(print_losses),
         )
 
-    # Row scaling: scale each row by its RMS to avoid huge disparities
-    if use_row_scale:
-        row_rms = np.sqrt(np.mean(P * P, axis=1))
-        row_rms[row_rms == 0.0] = 1.0
-        w = 1.0 / row_rms
-        Pw = P * w[:, None]
-        bw = b * w
-    else:
-        Pw = P
-        bw = b
-
-    # Column scaling: normalize columns
-    if use_col_scale:
-        col_rms = np.sqrt(np.mean(Pw * Pw, axis=0))
-        col_rms[col_rms == 0.0] = 1.0
-        Ps = Pw / col_rms[None, :]
-    else:
-        col_rms = np.ones(P.shape[1], dtype=np.float64)
-        Ps = Pw
-
-    # Warm-start safety: the number of columns can change when the spectrum-driven
-    # pruning changes, so ignore an incompatible initial guess instead of failing.
+    # Warm-start safety: the number of columns can change across solves,
+    # so ignore an incompatible initial guess instead of failing.
     if x0 is not None:
         x0 = np.asarray(x0, dtype=float).reshape(-1)
         if x0.size == 0:
@@ -174,49 +99,26 @@ def solve_box_ridge_lbfgsb(
             )
             x0 = None
 
-    # Variable scaling: x = xs / col_rms  <=>  Ps xs ~ bw
-    lb_s = lb * col_rms
-    ub_s = ub * col_rms
-
     if x0 is None:
-        xs0 = np.zeros(P.shape[1])
+        x_init = np.zeros(P.shape[1])
     else:
-        xs0 = x0 * col_rms
+        x_init = x0
 
-    xs0 = np.minimum(np.maximum(xs0, lb_s), ub_s)
+    x_init = np.minimum(np.maximum(x_init, lb), ub)
 
-    # Optional spectrum-weighted ridge (MAP prior): penalize physical x scaled by sigma.
-    # penalty = 0.5 * ridge * sum((x / sigma_x)^2), where x = xs / col_rms
-    # => in scaled variables: sum((xs / (col_rms * sigma_x))^2)
-    ridge_xs_scale2 = None
-    if ridge_sigma_x is not None:
-        ridge_sigma_x = np.asarray(ridge_sigma_x, dtype=float).reshape(-1)
-        if ridge_sigma_x.shape[0] != P.shape[1]:
-            raise ValueError(
-                'ridge_sigma_x length mismatch '
-                f'(len={ridge_sigma_x.shape[0]} vs n_cols={P.shape[1]})'
-            )
-        denom = col_rms * ridge_sigma_x
-        denom[denom == 0.0] = 1.0
-        ridge_xs_scale2 = 1.0 / (denom * denom)
+    def fun(x):
+        r = P @ x - b
+        return 0.5 * (r @ r)
 
-    def fun(xs):
-        r = Ps @ xs - bw
-        if ridge_xs_scale2 is None:
-            return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
-        return 0.5 * (r @ r) + 0.5 * ridge * np.sum((xs * xs) * ridge_xs_scale2)
+    def jac(x):
+        r = P @ x - b
+        return P.T @ r
 
-    def jac(xs):
-        r = Ps @ xs - bw
-        if ridge_xs_scale2 is None:
-            return Ps.T @ r + ridge * xs
-        return Ps.T @ r + ridge * (xs * ridge_xs_scale2)
-
-    bounds = list(zip(lb_s, ub_s))
+    bounds = list(zip(lb, ub))
 
     res = spo.minimize(
         fun,
-        xs0,
+        x_init,
         jac=jac,
         method='L-BFGS-B',
         bounds=bounds,
@@ -229,8 +131,7 @@ def solve_box_ridge_lbfgsb(
             'ftol': 1e-9,
             # gtol: terminate when the projected-gradient infinity norm drops
             # below this value.  The appropriate threshold depends on the
-            # scale of the residual gradient at the true solution, which in
-            # turn depends on problem size and ridge magnitude.  Enable
+            # scale of the residual gradient at the true solution. Enable
             # diagnostics=True to print the actual gradient norm so you can
             # tune this.  Default 0.1 is intentionally generous — tighter
             # values cause the solver to exhaust max_iter without converging.
@@ -245,115 +146,14 @@ def solve_box_ridge_lbfgsb(
         },
     )
 
-    xs = res.x
-    x = xs / col_rms
-    return x, res
-
-
-def solve_box_ridge_trust_constr(
-    P,
-    b,
-    lb,
-    ub,
-    x0=None,
-    ridge=1e-6,
-    max_iter=200,
-    ridge_sigma_x=None,
-    gtol=1e-4,
-):
-    """
-    Solve: min 0.5||P x - b||^2 + 0.5*ridge*||x||^2  s.t. lb <= x <= ub.
-
-    Uses trust-constr with an exact Hessian-vector product (hessp).
-    The Hessian H = PᵀP + ridge·diag(...) is constant (linear model), so
-    hessp(x, p) = Pᵀ(P p) + ridge·p costs exactly two matrix-vector products
-    per iteration — the same as one gradient call.  trust-constr builds its
-    trust-region subproblem from this exact curvature rather than approximating
-    it from gradient history, so it converges in tens of iterations rather than
-    hundreds even when wave components are heavily correlated.
-
-    Supports warm start via x0, unlike lsq_linear.
-    """
-    # Row scaling
-    row_rms = np.sqrt(np.mean(P * P, axis=1))
-    row_rms[row_rms == 0.0] = 1.0
-    w = 1.0 / row_rms
-    Pw = P * w[:, None]
-    bw = b * w
-
-    # Column scaling
-    col_rms = np.sqrt(np.mean(Pw * Pw, axis=0))
-    col_rms[col_rms == 0.0] = 1.0
-    Ps = Pw / col_rms[None, :]
-
-    # Warm-start safety
-    if x0 is not None:
-        x0 = np.asarray(x0, dtype=float).reshape(-1)
-        if x0.size == 0 or not np.all(np.isfinite(x0)) or x0.shape[0] != P.shape[1]:
-            x0 = None
-
-    # Variable scaling
-    lb_s = lb * col_rms
-    ub_s = ub * col_rms
-
-    if x0 is None:
-        xs0 = np.zeros(P.shape[1])
-    else:
-        xs0 = x0 * col_rms
-    xs0 = np.minimum(np.maximum(xs0, lb_s), ub_s)
-
-    # Optional per-component ridge scaling (spectrum-weighted prior)
-    ridge_xs_scale2 = None
-    if ridge_sigma_x is not None:
-        ridge_sigma_x = np.asarray(ridge_sigma_x, dtype=float).reshape(-1)
-        if ridge_sigma_x.shape[0] != P.shape[1]:
-            raise ValueError(
-                'ridge_sigma_x length mismatch '
-                f'(len={ridge_sigma_x.shape[0]} vs n_cols={P.shape[1]})'
-            )
-        denom = col_rms * ridge_sigma_x
-        denom[denom == 0.0] = 1.0
-        ridge_xs_scale2 = 1.0 / (denom * denom)
-
-    def fun(xs):
-        r = Ps @ xs - bw
-        if ridge_xs_scale2 is None:
-            return 0.5 * (r @ r) + 0.5 * ridge * (xs @ xs)
-        return 0.5 * (r @ r) + 0.5 * ridge * np.sum((xs * xs) * ridge_xs_scale2)
-
-    def jac(xs):
-        r = Ps @ xs - bw
-        if ridge_xs_scale2 is None:
-            return Ps.T @ r + ridge * xs
-        return Ps.T @ r + ridge * (xs * ridge_xs_scale2)
-
-    def hessp(xs, p):
-        # Hessian of the objective is H = PsᵀPs + ridge·diag(...).
-        # It is constant (does not depend on xs), so this is an exact product.
-        # Two matrix-vector products: same cost as one gradient evaluation.
-        hp = Ps.T @ (Ps @ p)
-        if ridge_xs_scale2 is None:
-            return hp + ridge * p
-        return hp + ridge * (p * ridge_xs_scale2)
-
-    bounds = spo.Bounds(lb_s, ub_s)
-
-    res = spo.minimize(
-        fun,
-        xs0,
-        method='trust-constr',
-        jac=jac,
-        hessp=hessp,
-        bounds=bounds,
-        options={
-            'maxiter': max_iter,
-            'gtol': gtol,
-            'verbose': 0,
-        },
-    )
-
-    xs = res.x
-    x = xs / col_rms
+    x = res.x
+    if print_losses:
+        r = P @ x - b
+        data_loss = 0.5 * float(r @ r)
+        print(
+            f'SciPy loss:  total={data_loss:.6e}  data={data_loss:.6e}',
+            flush=True,
+        )
     return x, res
 
 
@@ -369,28 +169,13 @@ def leastSquaresWavePropagation(
     y2,
     wavespec,
     A0=None,
-    A0_active_indices=None,
-    ridge=1e-6,
     max_iter=60,
     solver_backend='auto',
-    use_spectrum_weighted_ridge=True,
-    spectrum_ridge_floor=1e-6,
     diagnostics=False,
     near_bound_ratio=0.95,
     profiling=None,
     gtol=0.1,
-    lambda_freq_smooth=0.0,
-    lambda_theta_smooth=0.0,
-    lambda_time=0.0,
     print_losses=False,
-    freq_energy_frac=0.05,
-    dir_energy_frac=0.10,
-    active_grid_pad=1,
-    use_rank_reduction=False,
-    rank_tol=1e-3,
-    max_rank=None,
-    use_row_scale=True,
-    use_col_scale=True,
 ):
     """
     Phase-resolved prediction of sea surface elevation.
@@ -420,29 +205,14 @@ def leastSquaresWavePropagation(
           - f      : 1D array, frequencies [Hz]
           - theta  : 1D array, directions [deg True, FROM]
     A0 : array-like, optional
-        Warm-start amplitudes from the previous solve (reduced active-set vector).
-    A0_active_indices : array-like of int, optional
-        Active grid indices (params.active_good_indices) from the previous solve.
-        When the active set changes between windows this is used to remap the
-        overlapping components instead of discarding the warm start entirely.
-    ridge : float, optional
-        Ridge (L2) regularization strength. Set to 0.0 to disable.
+        Warm-start amplitudes from the previous solve.
     max_iter : int, optional
         Maximum optimizer iterations.
     solver_backend : str, optional
         Solver backend:
           'auto'         — jax if available, else scipy L-BFGS-B (default)
-          'scipy'        — L-BFGS-B; fast per-iteration, warm-start capable,
-                           but may stall on highly correlated components
-          'trust-constr' — second-order trust-region with exact hessp; converges
-                           reliably where L-BFGS-B stalls; warm-start capable
+          'scipy'        — scipy L-BFGS-B
           'jax'          — L-BFGS-B on GPU via jaxopt
-    use_spectrum_weighted_ridge : bool, optional
-        If True, scale ridge penalty per component using spectrum-derived bounds.
-        Set False to disable spectrum-weighted ridge.
-    spectrum_ridge_floor : float, optional
-        Minimum per-component ridge floor when weighted ridge is enabled.
-        Ignored when use_spectrum_weighted_ridge=False.
     diagnostics : bool, optional
         If True, print solver diagnostics (iteration count, status, bound ratios).
     near_bound_ratio : float, optional
@@ -456,34 +226,6 @@ def leastSquaresWavePropagation(
         norm at each solve so you can calibrate this for your problem.  Default
         0.1 is intentionally generous to allow natural convergence; tighter
         values (e.g. 1e-3) may cause the solver to exhaust max_iter.
-    freq_energy_frac : float, optional
-        Fraction of peak marginal energy S(f) below which a frequency bin is
-        removed from the active grid before building P.  Default 0.05 keeps
-        the central 95 % of spectral energy and rarely needs tuning. Set 0.0
-        to disable frequency pruning.
-    dir_energy_frac : float, optional
-        Fraction of the local directional peak at each frequency below which a
-        direction bin is removed.  Default 0.10 retains all lobes with more
-        than 10 % of the local peak energy, preserving bimodal seas. Set 0.0
-        to disable directional pruning.
-    active_grid_pad : int, optional
-        +/- bin halo added after thresholding: avoids cutting off spectral
-        shoulders.  Frequency padding is non-wrapping; direction padding is
-        circular.  Default 1. Has no effect when both pruning fractions are 0.
-    use_rank_reduction : bool, optional
-        If True, compress the active-space design matrix P to its numerically
-        independent subspace via truncated SVD before solving.  The solve is
-        closed-form and very fast, but box constraints are enforced only
-        approximately (post-projection clip).  Disabled by default; treat as
-        experimental.  See solve_reduced_rank_svd docstring for full discussion.
-    rank_tol : float, optional
-        Singular-value threshold for rank reduction: keep components i where
-        s_i / s_0 >= rank_tol.  Default 1e-3.  Only used when
-        use_rank_reduction=True.
-    max_rank : int or None, optional
-        Hard cap on retained rank.  None means no cap.  Only used when
-        use_rank_reduction=True.
-
     """
     prof = profiling if isinstance(profiling, dict) else None
     if prof is not None:
@@ -577,18 +319,14 @@ def leastSquaresWavePropagation(
     theta_u = unique_vals
     Etheta_u = Etheta[:, idx_last]
 
-    # shift by 180°, sort by that, and apply the same permutation to BOTH theta and Etheta.
-    # MATLAB gospel: after the TO-direction sort, wavespec.theta is NOT re-permuted —
-    # only Etheta is permuted.  theta_u_sorted therefore stays in the original
-    # unique-ascending (FROM-degrees) order.  DTp = theta_u_sorted[col_idx] then
-    # gives approximately the TO direction (same arithmetic as MATLAB), and
-    # kx = k*sin(theta), ky = k*cos(theta) with that TO-centered theta is correct.
+    # Shift by 180° into TO-direction frame, sort, and apply the same permutation
+    # to directional bins so theta/Etheta stay aligned for peak lookup/integration.
     t = theta_u + 180.0
     t[t > 360.0] -= 360.0
     I_sort = np.argsort(t)
 
-    theta_u_sorted = theta_u.copy()        # NOT permuted — matches MATLAB wavespec.theta
-    Etheta_u_sorted = Etheta_u[:, I_sort]  # permuted — matches MATLAB wavespec.Etheta
+    theta_u_sorted = t[I_sort]
+    Etheta_u_sorted = Etheta_u[:, I_sort]
 
     t_stage = prof_mark('spectrum_prep_s', t_stage)
 
@@ -600,6 +338,11 @@ def leastSquaresWavePropagation(
     DTp = np.deg2rad(theta_u_sorted[col_idx])  # radians
 
     f = f_in
+    # Use the local spacing between frequency bins instead of one fixed `df`.
+    # The source spectrum and the later log-spaced solve grid are not always
+    # evenly spaced, so treating every bin the same can bias the energy
+    # weighting. `np.gradient(f)` gives a simple per-bin width that keeps the
+    # 5 %-cutoff and later energy calculations matched to the actual binning.
     df = np.gradient(f)
 
     E_1d = trapz(Etheta_u_sorted.T, x=theta_u_sorted, axis=0)
@@ -630,7 +373,7 @@ def leastSquaresWavePropagation(
     theta = theta.flatten(order='F')
     # print(f'{theta=}')
 
-    # DTp ≈ TO direction (see theta_u_sorted comment above), so kx/ky follow MATLAB directly.
+    # DTp is in TO-centered frame, so kx/ky follow MATLAB directly.
     kx = np.outer(k, np.sin(theta))
     ky = np.outer(k, np.cos(theta))
     omega = np.outer(np.sqrt(9.81 * k), np.ones_like(theta))
@@ -685,13 +428,13 @@ def leastSquaresWavePropagation(
         Ei[np.isnan(Ei)] = 0.0
         t_stage = prof_mark('interp_griddata_s', t_stage)
 
-        Ei *= trapz(E_1d, x=f, axis=0) / trapz(
-            trapz(Ei, x=np.degrees(thet2[:, 0]), axis=0),
-            x=f2[0, :] / (2.0 * np.pi),
-            axis=0,
-        )
-        t_stage = prof_mark('interp_renorm_s', t_stage)
-
+        f2_hz = f2[0, :] / (2.0 * np.pi)
+        # Do the same thing on the interpolated grid. These frequency bins come
+        # from `logspace`, so they are not evenly spaced either. Using
+        # `np.gradient` here lets each amplitude use its own bin width, which
+        # keeps the total-energy rescaling and `sqrt(E * df * dtheta)` step
+        # consistent.
+        df2_hz = np.gradient(f2_hz)
         dtheta_mode_deg = (
             sps.mode(
                 np.diff(np.degrees(thet2[:, 0])),
@@ -701,8 +444,13 @@ def leastSquaresWavePropagation(
             .mode
             .item()
         )
-        df2 = np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
-        amps = np.sqrt(Ei * df2 * dtheta_mode_deg)
+        m0_src = trapz(E_1d, x=f, axis=0)
+        m0_tgt = float(np.sum(np.sum(Ei * df2_hz[np.newaxis, :], axis=1) * dtheta_mode_deg))
+        if np.isfinite(m0_tgt) and m0_tgt > 0.0:
+            Ei *= (m0_src / m0_tgt)
+        t_stage = prof_mark('interp_renorm_s', t_stage)
+
+        amps = np.sqrt(Ei * df2_hz[np.newaxis, :] * dtheta_mode_deg)
         amps_base = amps.T.flatten(order='F')
         amps_base[np.isnan(amps_base)] = 0.0
         good = np.nonzero(amps_base != 0.0)[0]
@@ -726,32 +474,8 @@ def leastSquaresWavePropagation(
             pass
 
     # Drop zero-energy base components before building phi/cos/sin.
-    # Capture the full base grid shape for the smoothness edge-list builder.
-    # k and theta are 1-D arrays of length n_k (40) and n_theta (25) at this point.
     _grid_shape = (int(np.asarray(k).size), int(np.asarray(theta).size))
     good_base = np.asarray(good, dtype=int).reshape((-1,))
-
-    # Wavespec-based active-grid pruning: intersect the zero-energy mask with a
-    # physically motivated threshold mask derived from the interpolated spectrum.
-    # Ei has shape (n_theta, n_f); transpose to (n_f, n_theta) for the utility.
-    # This is cheap (no griddata) so it always runs even on cache hits.
-    if freq_energy_frac > 0.0 or dir_energy_frac > 0.0:
-        _, active_good, _ = build_active_grid_from_wavespec(
-            np.asarray(Ei, dtype=float).T,   # (n_f=40, n_theta=25)
-            freq_energy_frac=float(freq_energy_frac),
-            dir_energy_frac=float(dir_energy_frac),
-            pad_freq=int(active_grid_pad),
-            pad_theta=int(active_grid_pad),
-        )
-        good_base = np.intersect1d(good_base, active_good)
-        if diagnostics:
-            print(
-                f'active grid: {good_base.size}/{_grid_shape[0] * _grid_shape[1]} '
-                f'components retained '
-                f'(freq_frac={freq_energy_frac}, dir_frac={dir_energy_frac}, '
-                f'pad={active_grid_pad})',
-                flush=True,
-            )
     if good_base.size > 0 and good_base.size < int(np.asarray(kx).size):
         kx = np.asarray(kx, dtype=float).reshape((-1,))[good_base]
         ky = np.asarray(ky, dtype=float).reshape((-1,))[good_base]
@@ -880,26 +604,6 @@ def leastSquaresWavePropagation(
     t_0 = time.time()
     t_stage_solve = time.perf_counter()
 
-    # Warm-start remapping: if the active set changed since the last window,
-    # A0 will be the wrong length.  When the caller also supplies the previous
-    # active indices we can copy the overlapping components rather than
-    # discarding the entire warm start.
-    if A0 is not None and A0_active_indices is not None:
-        A0 = np.asarray(A0, dtype=float).reshape(-1)
-        prev_idx = np.asarray(A0_active_indices, dtype=int).reshape(-1)
-        if A0.size == 2 * prev_idx.size and np.all(np.isfinite(A0)) and A0.size > 0:
-            _common, _prev_li, _cur_li = np.intersect1d(
-                prev_idx, good_base, return_indices=True,
-            )
-            n_prev = prev_idx.size
-            A0_remapped = np.zeros(2 * good_base.size, dtype=float)
-            if _common.size > 0:
-                A0_remapped[_cur_li]                  = A0[_prev_li]
-                A0_remapped[good_base.size + _cur_li] = A0[n_prev + _prev_li]
-            A0 = A0_remapped
-        else:
-            A0 = None  # incompatible — fall back to zeros
-
     # Box bounds on the cosine/sine quadrature coefficients.
     #
     # The solver represents each wave component as:
@@ -912,13 +616,6 @@ def leastSquaresWavePropagation(
     lb = -amps / 1.4142
     ub =  amps / 1.4142
 
-    ridge_sigma_x = None
-    if use_spectrum_weighted_ridge:
-        # Use the spectrum-derived coefficient scale as a prior std-dev for each component.
-        # This is physically motivated: low-energy components should have small coefficients.
-        # Use the same scale used by the box bounds (ub) so the prior matches the constraint.
-        ridge_sigma_x = np.maximum(np.asarray(ub, dtype=float), float(spectrum_ridge_floor))
-
     # Keep matrix construction fast in float32, but solve in float64 for optimizer stability.
     P1_solve = np.asarray(P1, dtype=np.float64)
     P2_solve = np.asarray(P2, dtype=np.float64)
@@ -926,28 +623,16 @@ def leastSquaresWavePropagation(
     lb_solve = np.asarray(lb, dtype=np.float64)
     ub_solve = np.asarray(ub, dtype=np.float64)
 
-    A, info = solve_box_ridge_lbfgsb(
+    A, info = solve_box_lbfgsb(
         P1_solve,
         b_solve,
         lb_solve,
         ub_solve,
-        x0=A0,  # pass previous A here for warm-start (see below)
-        ridge=float(ridge),
+        x0=A0,
         max_iter=int(max_iter),
-        ridge_sigma_x=ridge_sigma_x,
         backend=solver_backend,
         gtol=float(gtol),
-        good_indices=good_base,
-        grid_shape=_grid_shape,
-        lambda_time=float(lambda_time),
-        lambda_freq_smooth=float(lambda_freq_smooth),
-        lambda_theta_smooth=float(lambda_theta_smooth),
         print_losses=bool(print_losses),
-        use_rank_reduction=bool(use_rank_reduction),
-        rank_tol=float(rank_tol),
-        max_rank=max_rank if max_rank is None else int(max_rank),
-        use_row_scale=bool(use_row_scale),
-        use_col_scale=bool(use_col_scale),
     )
     t = time.time() - t_0
     if prof is not None:
@@ -1022,13 +707,12 @@ def leastSquaresWavePropagation(
     if diagnostics:
         # Compute the projected gradient inf-norm at the solution manually.
         # info.jac from spo.minimize is unreliable when max iterations is hit.
-        # The gradient of 0.5*||P1*A - b||^2 + 0.5*ridge*||A||^2 is:
-        #   g = P1.T @ (P1 @ A - b) + ridge * A
+        # The gradient of 0.5*||P1*A - b||^2 is g = P1.T @ (P1 @ A - b).
         # The projected gradient zeroes out components where A is at a bound
         # and the raw gradient points further into the bound — those variables
         # are optimally constrained and should not count against convergence.
         try:
-            g_raw = P1_solve.T @ (P1_solve @ A - b_solve) + float(ridge) * A
+            g_raw = P1_solve.T @ (P1_solve @ A - b_solve)
             g_proj = g_raw.copy()
             at_lb = A <= lb_solve + 1e-14 * np.abs(lb_solve).clip(1.0)
             at_ub = A >= ub_solve - 1e-14 * np.abs(ub_solve).clip(1.0)
@@ -1080,14 +764,6 @@ def leastSquaresWavePropagation(
     # bookkeeping into params
     params = LSQWavePropParams()
     params.A = A
-    params.rank_used = int(getattr(info, 'rank_used', -1))
-    params.active_good_indices = good_base.copy()  # active F-order grid indices for this window
-    # Full-grid expansion: useful for plotting and cross-window warm-start remapping.
-    _cos_grid, _sin_grid, _amp_grid = expand_active_solution(A, good_base, _grid_shape)
-    params.A_full = np.concatenate((
-        _cos_grid.flatten(order='F'),
-        _sin_grid.flatten(order='F'),
-    ))
     params.bound_near_ratio_threshold = float(near_bound_ratio)
     params.bound_frac_ge_threshold = float(frac_near)
     params.bound_ratio_max = float(max_ratio)
@@ -1098,13 +774,19 @@ def leastSquaresWavePropagation(
     params.Etheta = np.zeros_like(Ei.flatten(order='F')).T
     params.Etheta[good_base] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
     params.Etheta = params.Etheta.reshape((len(k), len(theta)), order='F').T
-    params.Etheta /= (
-        np.diff(f2[0, :] / (2.0 * np.pi), prepend=0.0)
-        * sps.mode(
+    dtheta_mode_deg = (
+        sps.mode(
             np.diff(np.degrees(thet2[:, 0])),
             axis=None,
             keepdims=False
         ).mode.item()
+    )
+    # Use the same per-bin scaling here so converting the solved amplitudes
+    # back to `params.Etheta` matches the earlier `* df * dtheta` step.
+    df2_hz = np.gradient(f2[0, :] / (2.0 * np.pi))
+    params.Etheta /= (
+        df2_hz
+        * dtheta_mode_deg
     )
 
     params.f = (f2[0, :] / (2.0 * np.pi)).flatten()

@@ -9,13 +9,20 @@ import numpy as np
 import scipy.io as sio
 import xarray as xr
 
-from .download_example_data import get_example_data_dir
+from .download_example_data import (
+    get_default_example_name,
+    get_example_data_dir,
+    get_example_sbg_paths,
+    get_example_select_idx,
+    get_example_swift_paths,
+    load_example_sbg_bursts,
+    load_example_wavespec,
+)
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
 from .swift import Prediction, SWIFTArray, WaveSpec
 from .utilities import (
     build_wavespec_from_swifts,
-    bulk_dir_params_from_Etheta,
-    bulk_wave_params_from_1d_spectrum,
+    build_wavespec_from_directional_spectrum,
     bulk_wave_params_from_wavespec,
     centroid_period_and_phase_speed,
     format_bulk_wave_params,
@@ -41,6 +48,8 @@ def plot_wavespec_comparison(
     # Locate wavespec.mat
     mat_path = Path(example_data_dir) / 'wavespec.mat'
     if not mat_path.exists():
+        mat_path = Path(__file__).parents[3] / 'ExampleData1' / 'wavespec.mat'
+    if not mat_path.exists():
         mat_path = Path(__file__).parents[3] / 'ExampleData' / 'wavespec.mat'
     if not mat_path.exists():
         print(f'[comparison] wavespec.mat not found; skipping comparison figure')
@@ -48,52 +57,23 @@ def plot_wavespec_comparison(
 
     m = sio.loadmat(str(mat_path), squeeze_me=True, struct_as_record=False)
     ws_m = m['wavespec']
-    Etheta_mat = np.asarray(ws_m.Etheta, dtype=float)
-    theta_mat  = np.asarray(ws_m.theta,  dtype=float).ravel()
-    f_mat      = np.asarray(ws_m.f,      dtype=float).ravel()
-
-    # Ensure (nfreq, ntheta) — MATLAB saves (42, 180) = (f.size, theta.size)
-    if Etheta_mat.shape == (theta_mat.size, f_mat.size):
-        Etheta_mat = Etheta_mat.T
+    wavespec_mat = build_wavespec_from_directional_spectrum(ws_m.Etheta, ws_m.theta, ws_m.f)
+    Etheta_mat = np.asarray(wavespec_mat.Etheta, dtype=float)
+    theta_mat = np.asarray(wavespec_mat.theta, dtype=float).ravel()
+    f_mat = np.asarray(wavespec_mat.f, dtype=float).ravel()
+    E_mat = np.asarray(wavespec_mat.E, dtype=float).ravel()
 
     # ------------------------------------------------------------------ MATLAB bulk params
-    # wavespec.mat stores Etheta/theta/f only.  The MATLAB E(f) that was used to
-    # compute Hs at the time the file was saved came directly from
-    # SWIFT(ai).wavespectra.energy — it was never derived by integrating Etheta.
-    # That raw E(f) is NOT in wavespec.mat, so the only reconstruction available
-    # is numerical integration:
-    #
-    #   E(f) = ∫ Etheta(f, θ) dθ   (in radians)
-    #
-    # MEM_directionalestimator normalises Sn so that ∫ Sn dθ_rad = 1, making
-    # Etheta units m²/Hz/rad.  Therefore dtheta must be in RADIANS here.
-    # Using dtheta_deg (≈57× larger) would give physically impossible Hs (~18 m).
-    dtheta_mat = float(np.nanmedian(np.diff(np.sort(theta_mat)))) * (np.pi / 180.0)  # rad
-    E_mat      = np.sum(Etheta_mat * dtheta_mat, axis=1)   # (nfreq,)  ← ∫ Etheta dθ_rad
-    mat_bulk   = bulk_wave_params_from_1d_spectrum(f_mat, E_mat)
+    # wavespec.mat stores only Etheta/theta/f, so we reconstruct the derived
+    # `WaveSpec.E` and `WaveSpec.dir` fields from that directional spectrum and
+    # then run the same bulk-parameter helper used elsewhere in the Python port.
+    mat_bulk = bulk_wave_params_from_wavespec(wavespec_mat)
 
     Hs_mat = mat_bulk['Hs_m']
     Tp_mat = mat_bulk['Tp_s']
-
-    # Derive Dp/Dm/spread from Etheta_mat by computing first circular moments.
-    # SWIFTdirectionalspectra outputs per-frequency direction as atan2(a1, b1)
-    # in compass convention (a1=east=sin(θ), b1=north=cos(θ)).  Reconstruct
-    # dir_freqband here so bulk_dir_params_from_Etheta gives MATLAB-faithful values.
-    _theta_rad_m = np.deg2rad(theta_mat)
-    with np.errstate(invalid='ignore', divide='ignore'):
-        _a1_m = np.where(E_mat > 0,
-                         np.sum(Etheta_mat * np.sin(_theta_rad_m) * dtheta_mat, axis=1) / E_mat,
-                         np.nan)
-        _b1_m = np.where(E_mat > 0,
-                         np.sum(Etheta_mat * np.cos(_theta_rad_m) * dtheta_mat, axis=1) / E_mat,
-                         np.nan)
-    dir_freqband_mat = np.mod(np.rad2deg(np.arctan2(_a1_m, _b1_m)), 360.0)
-    mat_dir_bulk = bulk_dir_params_from_Etheta(
-        f_mat, theta_mat, Etheta_mat, dir_freqband=dir_freqband_mat
-    )
-    Dp_mat     = mat_dir_bulk['Dp_deg']
-    Dm_mat     = mat_dir_bulk['Dm_deg']
-    spread_mat = mat_dir_bulk['spreadp_deg']
+    Dp_mat = mat_bulk['Dp_deg']
+    Dm_mat = mat_bulk['Dm_deg']
+    spread_mat = mat_bulk['spreadp_deg']
 
     # ------------------------------------------------------------------ Python side (4-buoy mean)
     Etheta_py = np.asarray(wavespec_base.Etheta, dtype=float)
@@ -306,6 +286,12 @@ def plot_wavespec_comparison(
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
+        '--example-name',
+        type=str,
+        default=None,
+        help='Folder name under example_data/ to use. Defaults to ExampleData1 when present, else the first available dataset.',
+    )
+    p.add_argument(
         '--movie',
         type=str,
         default=None,
@@ -347,12 +333,10 @@ def parse_args():
         '--solver-backend',
         type=str,
         default='auto',
-        choices=('auto', 'scipy', 'jax', 'trust-constr'),
-        help='Solver backend: auto (default, uses jax/GPU when available, else scipy), '
-             'jax (always use jax — warns if no GPU found), '
-             'scipy (always use scipy L-BFGS-B, fastest on CPU), '
-             'trust-constr (second-order trust-region with exact hessp; '
-             'converges reliably where L-BFGS-B stalls).',
+           choices=('auto', 'scipy', 'jax'),
+           help='Solver backend: auto (default, uses jax/GPU when available, else scipy), '
+               'jax (always use jax — warns if no GPU found), '
+               'scipy (always use scipy L-BFGS-B).',
     )
     p.add_argument(
         '--wavespec-swift',
@@ -376,7 +360,6 @@ def parse_args():
 
 
 A0 = None
-A0_indices = None
 all_preds = Prediction()
 max_iter = 5
 solver_backend = 'auto'
@@ -386,7 +369,6 @@ matlab_ti_offset_increment = 1  # iterative adjustment to offset
 
 def main():
     global A0
-    global A0_indices
     global all_preds
     global max_iter
     global solver_backend
@@ -407,71 +389,64 @@ def main():
     skipwarmup = 200
     burstend = 2740
 
-    example_data_dir = get_example_data_dir()
-    swiftdat = (
-        (
-            example_data_dir
-            / 'SWIFT22_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat'
-        ),
-        (
-            example_data_dir
-            / 'SWIFT23_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat'
-        ),
-        (
-            example_data_dir
-            / 'SWIFT24_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat'
-        ),
-        (
-            example_data_dir
-            / 'SWIFT25_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat'
-        ),
-    )
+    example_name = args.example_name or get_default_example_name()
+    example_data_dir = get_example_data_dir(example_name=example_name)
+    sbgdat = get_example_sbg_paths(example_name=example_name)
+    sbg_bursts = load_example_sbg_bursts(example_name=example_name)
 
-    sbgdat = (
-        example_data_dir / 'SWIFT22_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT23_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT24_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT25_SBG_12Sep2022_07_01.mat',
-    )
+    print(f'example dataset: {example_name} ({example_data_dir})')
 
-    select_idx = 91  # MATLAB burst index 92
-    swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
+    wavespec_base = load_example_wavespec(example_name=example_name)
+    print(f'wavespec for predictions: wavespec.mat from {example_name} (default)')
 
-    # 1) wavespec via SWIFTdirectionalspectra() on processed SWIFT burst structs
-    # Direction convention: use compass degrees True, direction waves come FROM.
-    # (The plotter then draws propagation TO = FROM + 180.)
-    _all_bursts = swifts.bursts(raw_sbg=False)   # [swift22, swift23, swift24, swift25]
-    _swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
-    _wavespec_swift_idx = args.wavespec_swift  # 1-based index or None
+    wavespec_all4_base = None
+    wavespec_all4_bulk = None
+    wavespec_swift22_base = None
+    wavespec_swift22_bulk = None
 
-    # The 4-buoy mean is always computed — it is always shown in the comparison plot (col 1).
-    wavespec_all4_base = build_wavespec_from_swifts(_all_bursts, recip=True)
-    wavespec_all4_bulk = bulk_wave_params_from_wavespec(wavespec_all4_base)
+    swiftdat = get_example_swift_paths(example_name=example_name)
+    if swiftdat is not None:
+        select_idx = get_example_select_idx(example_name=example_name)
+        swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
 
-    if _wavespec_swift_idx is not None:
-        _sel = _all_bursts[_wavespec_swift_idx - 1]
-        _label = _swift_names[_wavespec_swift_idx - 1]
-        wavespec_base = build_wavespec_from_swifts([_sel], recip=True)
-        print(f'wavespec for predictions: {_label} (--wavespec-swift {_wavespec_swift_idx})')
-    else:
-        wavespec_base = wavespec_all4_base
-        print('wavespec for predictions: mean of all 4 SWIFTs (default)')
+        # Optional per-buoy SWIFT wavespectra are only available in the older
+        # example bundle layout. Keep supporting them when present.
+        _all_bursts = swifts.bursts(raw_sbg=False)
+        _swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
+        _wavespec_swift_idx = args.wavespec_swift
+
+        wavespec_all4_base = build_wavespec_from_swifts(_all_bursts, recip=True)
+        wavespec_all4_bulk = bulk_wave_params_from_wavespec(wavespec_all4_base)
+
+        if _wavespec_swift_idx is not None:
+            _sel = _all_bursts[_wavespec_swift_idx - 1]
+            _label = _swift_names[_wavespec_swift_idx - 1]
+            wavespec_base = build_wavespec_from_swifts([_sel], recip=True)
+            print(
+                f'wavespec for predictions overridden with {_label} '
+                f'(--wavespec-swift {_wavespec_swift_idx})'
+            )
+
+        wavespec_swift22_base = build_wavespec_from_swifts([swifts.swift22], recip=True)
+        wavespec_swift22_bulk = bulk_wave_params_from_wavespec(wavespec_swift22_base)
+        print(format_bulk_wave_params(wavespec_all4_bulk, 'wavespec_all4'))
+        print(format_bulk_wave_params(wavespec_swift22_bulk, 'wavespec_swift22'))
+    elif args.wavespec_swift is not None:
+        print(
+            'WARNING: --wavespec-swift requested, but this example bundle does not '
+            'include per-buoy processed SWIFT files; using wavespec.mat instead'
+        )
+
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
     wavespec_bulk = bulk_wave_params_from_wavespec(wavespec_base)
     print(format_bulk_wave_params(wavespec_bulk, 'wavespec'))
-
-    # SWIFT22-only wavespec always used for the comparison plot (col 2).
-    wavespec_swift22_base = build_wavespec_from_swifts([swifts.swift22], recip=True)
-    wavespec_swift22_bulk = bulk_wave_params_from_wavespec(wavespec_swift22_base)
-    print(format_bulk_wave_params(wavespec_swift22_bulk, 'wavespec_swift22'))
-    # plot_wavespec_comparison moved to after plt.ion() is set (below)
 
     # 2) raw SBGData burst structs
     # The example dataset uses an SBG heave sign convention that needs inversion
     # (mirrors the MATLAB example's explicit `zin = -zin`). For gz sim, do NOT
     # apply this flip.
     zin, uin, vin, tin, xin, yin, fs = load_raw_arrays_from_sbg(
-        swifts.bursts(raw_sbg=True),
+        sbg_bursts,
         skipwarmup,
         burstend,
         latorigin,
@@ -525,10 +500,17 @@ def main():
     # Keep the returned figure reference alive so the window is not closed/GC'd
     # while the prediction loop is running.  plt.pause() only pumps events for
     # the *active* figure, so holding this reference is what keeps fig_cmp alive.
-    fig_cmp = plot_wavespec_comparison(
-        wavespec_all4_base, wavespec_all4_bulk, example_data_dir,
-        wavespec_swift22_base, wavespec_swift22_bulk,
-    )
+    fig_cmp = None
+    if wavespec_all4_base is not None and wavespec_all4_bulk is not None:
+        fig_cmp = plot_wavespec_comparison(
+            wavespec_all4_base, wavespec_all4_bulk, example_data_dir,
+            wavespec_swift22_base, wavespec_swift22_bulk,
+        )
+    else:
+        print(
+            'processed SWIFT spectra not available for this example bundle; '
+            'skipping MATLAB-vs-Python wavespec comparison figure'
+        )
 
     fig_width = float(args.fig_width)
     fig_height = float(args.fig_height)
@@ -640,7 +622,6 @@ def main():
 
     def run_loop(grab_frame=False):
         global A0
-        global A0_indices
         global all_preds
         global max_iter
         global solver_backend
@@ -765,26 +746,11 @@ def main():
                 ws,
                 A0=A0,
                 max_iter=max_iter,
-                A0_active_indices=None,  # A0_indices,
                 solver_backend=solver_backend,
-                ridge=0.0,  # set 0.0 to disable base ridge
-                use_spectrum_weighted_ridge=False,  # set True to enable spectrum-weighted ridge
-                spectrum_ridge_floor=1e-6,
                 diagnostics=True,
-                gtol=0.1,
-                lambda_time=0.0,  # 0.1,            # set 0.0 to disable temporal continuity loss
-                lambda_freq_smooth=0.0,  # 1e-3,    # set 0.0 to disable frequency smoothing loss
-                lambda_theta_smooth=0.0,   # 1e-3,   # set 0.0 to disable directional smoothing loss
-                freq_energy_frac=0.0,      # 0.05,  # set 0.0 to disable frequency active-grid pruning
-                dir_energy_frac=0.0,       # 0.10,  # set 0.0 to disable directional active-grid pruning
-                active_grid_pad=1,
                 print_losses=True,
-                use_rank_reduction=False,  # set True to try SVD compression (bounds approximate)
-                use_row_scale=False,        # set False to disable row conditioning
-                use_col_scale=False,        # set False to disable column conditioning
             )
             A0 = params.A
-            A0_indices = params.active_good_indices
             print(f'solve time = {comp_time:.2f}s  nit={params.solver_nit}/{max_iter}')
             prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
             zout = prediction[:, 0]

@@ -69,6 +69,8 @@ class TheNextWavePlotterNode(Node):
         self.lock = threading.Lock()
         self.latest: Optional[WavePredictionOutput] = None
         self.dirty = False
+        self.last_time_ref: Optional[float] = None
+        self.time_rollback_tol_sec = max(1.0, 0.1 * history_sec)
 
         # Rolling history for WEC actual samples.
         # If a full WEC time series is carried in the message, we plot that directly.
@@ -94,6 +96,23 @@ class TheNextWavePlotterNode(Node):
 
     def is_window_open(self) -> bool:
         return self.plotter.is_window_open()
+
+    def maybe_reset_for_time_rollback(self, time_ref: Optional[float]) -> None:
+        if time_ref is None or not np.isfinite(time_ref):
+            return
+
+        prev = self.last_time_ref
+        self.last_time_ref = float(time_ref)
+        if prev is None or not np.isfinite(prev):
+            return
+
+        if float(time_ref) < float(prev) - float(self.time_rollback_tol_sec):
+            self.wec_hist.clear()
+            self.plotter.reset_runtime_state()
+            self.get_logger().info(
+                'Detected time rollback in plotter input '
+                f'({prev:.3f}s -> {float(time_ref):.3f}s); cleared rolling plot history.'
+            )
 
     def plot_once(self) -> bool:
         with self.lock:
@@ -130,11 +149,23 @@ class TheNextWavePlotterNode(Node):
         else:
             t_for_plot = t_meas
 
+        time_ref = None
+        window_end_time = float(msg.window_end_time)
+        if np.isfinite(window_end_time):
+            time_ref = window_end_time
+        elif t_meas.size and np.isfinite(t_meas[-1]):
+            time_ref = float(t_meas[-1])
+
         # Predictions (target)
         t_pred = np.array([float(p.time) for p in msg.predictions], dtype=float)
         z_pred = np.array([float(p.elevation) for p in msg.predictions], dtype=float)
         u_pred = np.array([float(p.vel_east) for p in msg.predictions], dtype=float)
         v_pred = np.array([float(p.vel_north) for p in msg.predictions], dtype=float)
+
+        if time_ref is None and t_pred.size and np.isfinite(t_pred[-1]):
+            time_ref = float(t_pred[-1])
+
+        self.maybe_reset_for_time_rollback(time_ref)
 
         # Dense target predictions series (optional)
         has_dense_predictions = bool(getattr(msg, 'has_dense_predictions', False))
@@ -217,7 +248,7 @@ class TheNextWavePlotterNode(Node):
             y_meas=y_meas,
             x_target=float(msg.x_target),
             y_target=float(msg.y_target),
-            window_end_time=float(msg.window_end_time),
+            window_end_time=window_end_time,
             t_meas=t_for_plot,
             z_meas=z_meas,
             u_meas=u_meas,

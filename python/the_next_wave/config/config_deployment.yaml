@@ -21,13 +21,8 @@
     wec_actual_history_sec: 50.0
 
     # Least-squares solver tuning
-    lsq_ridge: 1.0e-6  # overall MAP prior scale;
-                       # main effect is when use_spectrum_weighted_ridge is false
     lsq_max_iter: 60
     lsq_solver_backend: auto  # auto | jax | scipy
-    lsq_use_spectrum_weighted_ridge: true
-    lsq_spectrum_ridge_floor: 1.0e-6  # min per-component prior stddev (floor on ub); prevents
-                                      # infinite regularization on near-zero-energy components
     lsq_diagnostics_enable: true
     lsq_near_bound_ratio: 0.95
 

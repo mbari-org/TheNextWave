@@ -21,9 +21,58 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-def load_incwave_config() -> tuple[str, str, bool]:
+def load_incwave_config() -> tuple[str, str, str, bool]:
+    def stringify_number(value) -> str:
+        return str(float(value))
+
+    def encode_scalar_or_list(name: str, value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            return f"{name}:" + ':'.join(stringify_number(v) for v in value)
+        return f'{name}:{value}'
+
+    def encode_points_from_xy(x_vals, y_vals) -> str:
+        points = []
+        for x_val, y_val in zip(x_vals, y_vals):
+            points.append(f'{float(x_val)}:{float(y_val)}')
+        return ';'.join(points)
+
+    def parse_inc_wave_height_points(params: dict) -> str:
+        swift_coords = params.get('swift_coords', {}) or {}
+        x_vals = swift_coords.get('x', None)
+        y_vals = swift_coords.get('y', None)
+        if (
+            isinstance(x_vals, list)
+            and isinstance(y_vals, list)
+            and len(x_vals) == len(y_vals)
+            and x_vals
+        ):
+            return encode_points_from_xy(x_vals, y_vals)
+
+        return 'None'
+
+    def parse_inc_wave_spectrum(params: dict) -> str:
+        spectrum_cfg = params.get('bretschneider', None)
+        if spectrum_cfg is None:
+            spectrum_cfg = params.get('Bretschneider', None)
+
+        if not isinstance(spectrum_cfg, dict) or not spectrum_cfg:
+            return 'None'
+
+        parts = ['inc_wave_spectrum_type:Bretschneider']
+        for name, value in spectrum_cfg.items():
+            encoded = encode_scalar_or_list(name, value)
+            if encoded is not None:
+                parts.append(encoded)
+
+        return ';'.join(parts)
+
     inc_wave_dir = 'None'
     inc_wave_height_points = 'None'
+    inc_wave_spectrum = 'None'
     has_overrides = False
 
     try:
@@ -36,23 +85,19 @@ def load_incwave_config() -> tuple[str, str, bool]:
 
         wave_dir = params.get('wave_dir', None)
         if wave_dir is not None:
-            inc_wave_dir = str(float(wave_dir))
+            inc_wave_dir = stringify_number(wave_dir)
 
-        swift_coords = params.get('swift_coords', {}) or {}
-        x_vals = swift_coords.get('x', None)
-        y_vals = swift_coords.get('y', None)
-        if isinstance(x_vals, list) and isinstance(y_vals, list) and len(x_vals) == len(y_vals):
-            points = []
-            for x_val, y_val in zip(x_vals, y_vals):
-                points.append(f'{float(x_val)}:{float(y_val)}')
-            if points:
-                inc_wave_height_points = ';'.join(points)
-        has_overrides = (inc_wave_dir != 'None') and (inc_wave_height_points != 'None')
+        inc_wave_height_points = parse_inc_wave_height_points(params)
+        inc_wave_spectrum = parse_inc_wave_spectrum(params)
+        has_overrides = any(
+            value != 'None'
+            for value in (inc_wave_dir, inc_wave_height_points, inc_wave_spectrum)
+        )
     except Exception:
         # Keep launch robust: if YAML is missing/malformed, fall back to simulator defaults.
         pass
 
-    return inc_wave_dir, inc_wave_height_points, has_overrides
+    return inc_wave_dir, inc_wave_height_points, inc_wave_spectrum, has_overrides
 
 
 def resolve_gz_extra_args(context):
@@ -106,7 +151,8 @@ def generate_launch_description() -> LaunchDescription:
     mbari_wec_enable_effective = LaunchConfiguration('mbari_wec_enable_effective')
     gzsim_extra_gz_args = LaunchConfiguration('gzsim_extra_gz_args')
 
-    regular_inc_wave_dir, regular_inc_wave_height_points, has_incwave_overrides = \
+    regular_inc_wave_dir, regular_inc_wave_height_points, regular_inc_wave_spectrum, \
+        has_incwave_overrides = \
         load_incwave_config()
 
     pkg_share = FindPackageShare('the_next_wave')
@@ -124,13 +170,19 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     if has_incwave_overrides:
+        mbari_wec_launch_arguments = {
+            'extra_gz_args': gzsim_extra_gz_args,
+        }
+        if regular_inc_wave_dir != 'None':
+            mbari_wec_launch_arguments['inc_wave_dir'] = regular_inc_wave_dir
+        if regular_inc_wave_height_points != 'None':
+            mbari_wec_launch_arguments['inc_wave_height_points'] = regular_inc_wave_height_points
+        if regular_inc_wave_spectrum != 'None':
+            mbari_wec_launch_arguments['inc_wave_spectrum'] = regular_inc_wave_spectrum
+
         mbari_wec_include = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(mbari_wec_launch),
-            launch_arguments={
-                'extra_gz_args': gzsim_extra_gz_args,
-                'inc_wave_dir': regular_inc_wave_dir,
-                'inc_wave_height_points': regular_inc_wave_height_points,
-            }.items(),
+            launch_arguments=mbari_wec_launch_arguments.items(),
             condition=IfCondition(mbari_wec_enable_effective),
         )
     else:

@@ -85,11 +85,8 @@ class TheNextWaveNodeParams:
     latent_scale_max: float = 1.25
 
     # Least-squares solver controls
-    lsq_ridge: float = 1e-6
     lsq_max_iter: int = 60
     lsq_solver_backend: str = 'auto'
-    lsq_use_spectrum_weighted_ridge: bool = True
-    lsq_spectrum_ridge_floor: float = 1e-6
     lsq_diagnostics_enable: bool = False
     lsq_near_bound_ratio: float = 0.95
 
@@ -137,11 +134,8 @@ class TheNextWaveNodeParams:
                 f'  example_ytarget={self.example_ytarget},',
                 f'  swift_idx={swift_idx_str},',
                 f'  sbg_bridge_port_by_swift={port_map_str},',
-                f'  lsq_ridge={self.lsq_ridge},',
                 f'  lsq_max_iter={self.lsq_max_iter},',
                 f"  lsq_solver_backend='{self.lsq_solver_backend}',",
-                f'  lsq_use_spectrum_weighted_ridge={self.lsq_use_spectrum_weighted_ridge},',
-                f'  lsq_spectrum_ridge_floor={self.lsq_spectrum_ridge_floor},',
                 f'  lsq_diagnostics_enable={self.lsq_diagnostics_enable},',
                 f'  lsq_near_bound_ratio={self.lsq_near_bound_ratio},',
                 f'  mem_moment_cap_enable={self.mem_moment_cap_enable},',
@@ -229,11 +223,8 @@ class TheNextWaveNode(Interface):
                 wavespec_update_period_sec=self.params.wavespec_update_period_sec,
                 dense_prediction_window=self.params.dense_prediction_window,
                 enable_dense_history_projection=self.params.enable_dense_history_projection,
-                lsq_ridge=self.params.lsq_ridge,
                 lsq_max_iter=self.params.lsq_max_iter,
                 lsq_solver_backend=self.params.lsq_solver_backend,
-                lsq_use_spectrum_weighted_ridge=self.params.lsq_use_spectrum_weighted_ridge,
-                lsq_spectrum_ridge_floor=self.params.lsq_spectrum_ridge_floor,
                 lsq_diagnostics_enable=self.params.lsq_diagnostics_enable,
                 lsq_near_bound_ratio=self.params.lsq_near_bound_ratio,
                 mem_moment_cap_enable=self.params.mem_moment_cap_enable,
@@ -431,11 +422,15 @@ class TheNextWaveNode(Interface):
 
             window_end_time = float(results.get('window_end_time', float('nan')))
             wec_hist_filtered = []
+            history_t_min = float('-inf')
+            if np.isfinite(window_end_time):
+                history_t_min = window_end_time - float(self.params.wec_actual_history_sec)
             if wec_actual_hist:
                 for p in wec_actual_hist:
                     t_s = float(p[0])
                     if np.isfinite(t_s) and (
-                        not np.isfinite(window_end_time) or t_s <= window_end_time
+                        (not np.isfinite(window_end_time) or t_s <= window_end_time)
+                        and t_s >= history_t_min
                     ):
                         wec_hist_filtered.append(
                             (float(p[0]), float(p[1]), float(p[2]), float(p[3]))
@@ -773,6 +768,27 @@ class TheNextWaveNode(Interface):
                 inc0 = data.inc_wave_heights[0]
                 t0_us = inc0.pose.header.stamp.sec * 1e6 + inc0.pose.header.stamp.nanosec / 1e3
                 t0_s = float(t0_us) / 1e6
+                prev_wec_t_s = None
+                if self.wec_actual_latest is not None:
+                    try:
+                        prev_wec_t_s = float(self.wec_actual_latest.get('t_s', float('nan')))
+                    except Exception:
+                        prev_wec_t_s = None
+
+                if (
+                    prev_wec_t_s is not None
+                    and np.isfinite(prev_wec_t_s)
+                    and np.isfinite(t0_s)
+                    and t0_s < (prev_wec_t_s - 1.0e-3)
+                ):
+                    self.get_logger().warn(
+                        'Time jumped backwards for WEC actual history: '
+                        f'prev={prev_wec_t_s:.6f} s new={t0_s:.6f} s; '
+                        'clearing WEC actual history and predictor caches.'
+                    )
+                    self.wec_actual_hist.clear()
+                    self.predictor.reset_runtime_state()
+
                 wec_sample = {
                     't_s': t0_s,
                     'z': float(inc0.pose.pose.position.z),
@@ -880,6 +896,7 @@ class TheNextWaveNode(Interface):
                 f'prev={last_seen_t_us:.3f} us new={t_us:.3f} us (dt={dt_us:.3f} us)'
             )
             # Drop all pre-jump samples so timestamps remain monotonic.
+            self.predictor.reset_runtime_state()
             self.reset_swift_window(swift_num)
             sbg = getattr(self.swifts, f'sbg{swift_num}')
 
@@ -1122,14 +1139,8 @@ class TheNextWaveNode(Interface):
         )
 
         # Least-squares solver controls
-        self.declare_parameter('lsq_ridge', defaults.lsq_ridge)
         self.declare_parameter('lsq_max_iter', defaults.lsq_max_iter)
         self.declare_parameter('lsq_solver_backend', defaults.lsq_solver_backend)
-        self.declare_parameter(
-            'lsq_use_spectrum_weighted_ridge',
-            defaults.lsq_use_spectrum_weighted_ridge,
-        )
-        self.declare_parameter('lsq_spectrum_ridge_floor', defaults.lsq_spectrum_ridge_floor)
         self.declare_parameter('lsq_diagnostics_enable', defaults.lsq_diagnostics_enable)
         self.declare_parameter('lsq_near_bound_ratio', defaults.lsq_near_bound_ratio)
 
@@ -1237,25 +1248,16 @@ class TheNextWaveNode(Interface):
             self.get_parameter('enable_dense_history_projection').value
         )
 
-        params.lsq_ridge = float(self.get_parameter('lsq_ridge').value)
         params.lsq_max_iter = int(self.get_parameter('lsq_max_iter').value)
         params.lsq_solver_backend = str(self.get_parameter('lsq_solver_backend').value)
         backend_norm = params.lsq_solver_backend.strip().lower()
-        if backend_norm not in {'auto', 'gpu', 'scipy'}:
+        if backend_norm not in {'auto', 'jax', 'scipy'}:
             self.get_logger().warn(
                 'Unknown lsq_solver_backend=' f"'{params.lsq_solver_backend}', falling back to 'auto'"
             )
             backend_norm = 'auto'
         params.lsq_solver_backend = backend_norm
-        params.lsq_use_spectrum_weighted_ridge = bool(
-            self.get_parameter('lsq_use_spectrum_weighted_ridge').value
-        )
-        params.lsq_spectrum_ridge_floor = float(
-            self.get_parameter('lsq_spectrum_ridge_floor').value
-        )
-        params.lsq_diagnostics_enable = bool(
-            self.get_parameter('lsq_diagnostics_enable').value
-        )
+        params.lsq_diagnostics_enable = bool(self.get_parameter('lsq_diagnostics_enable').value)
         params.lsq_near_bound_ratio = float(self.get_parameter('lsq_near_bound_ratio').value)
 
         params.mem_moment_cap_enable = bool(self.get_parameter('mem_moment_cap_enable').value)
