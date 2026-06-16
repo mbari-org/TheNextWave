@@ -21,7 +21,7 @@ import rclpy
 from rclpy.node import Node
 
 from . import sbgMessageParse
-from .download_example_data import get_example_data_dir
+from .download_example_data import get_default_example_name, get_example_data_dir
 from .utilities import load_raw_sbg_arrays, select_sbg_burst_struct
 
 try:
@@ -53,6 +53,7 @@ class SbgTcpReplayNode(Node):
         # If <= 0, port is resolved from swifts.swiftNN (deployment-style mapping).
         self.declare_parameter('port', -1)
         self.declare_parameter('sbg_mat_path', '')
+        self.declare_parameter('example_name', '')
         self.declare_parameter('swift_num', 22)
         self.declare_parameter('start_index', 0)
         self.declare_parameter('end_index', -1)
@@ -63,6 +64,7 @@ class SbgTcpReplayNode(Node):
         self.host = str(self.get_parameter('host').value)
         self.port = int(self.get_parameter('port').value)
         self.sbg_mat_path = str(self.get_parameter('sbg_mat_path').value)
+        self.example_name = str(self.get_parameter('example_name').value).strip()
         self.swift_num = int(self.get_parameter('swift_num').value)
         self.start_index = int(self.get_parameter('start_index').value)
         self.end_index = int(self.get_parameter('end_index').value)
@@ -104,7 +106,8 @@ class SbgTcpReplayNode(Node):
 
     def resolve_default_mat_path(self) -> str:
         # Use/download the pinned example dataset.
-        example_dir = get_example_data_dir()
+        example_name = self.example_name or get_default_example_name()
+        example_dir = get_example_data_dir(example_name=example_name)
         if not example_dir.is_dir():
             raise FileNotFoundError(f'Example data dir does not exist: {example_dir}')
 

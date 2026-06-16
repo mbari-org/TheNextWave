@@ -136,6 +136,7 @@ class LivePlotter:
         self.z_err_median_abs_history = deque(maxlen=10)
         self.z_err_history_by_lead: dict[int, deque[float]] = {}
         self.latched_y_limits: dict[str, tuple[float, float]] = {}
+        self.map_half_span: float | None = None
 
         # Lightweight profiling
         self.profile_enabled = LIVE_PLOT_PROFILE
@@ -145,6 +146,66 @@ class LivePlotter:
             self.profile_every_n = 30
         self.profile_i = 0
         self.profile_ema_s: dict[str, float] = {}
+
+    def reset_runtime_state(self) -> None:
+        """Clear rolling verification and latched-axes state between runs."""
+        self.pending_z_forecasts_by_lead.clear()
+        self.latest_z_error_by_lead.clear()
+        self.z_err_median_abs_history.clear()
+        self.z_err_history_by_lead.clear()
+        self.latched_y_limits.clear()
+        self.map_half_span = None
+
+    def latest_valid_positions(self, a: np.ndarray) -> np.ndarray:
+        a = np.asarray(a, dtype=float)
+        if a.ndim != 2 or a.shape[1] <= 0:
+            return np.array([], dtype=float)
+
+        latest = np.full((a.shape[1],), np.nan, dtype=float)
+        for j in range(a.shape[1]):
+            col = a[:, j]
+            finite_idx = np.flatnonzero(np.isfinite(col))
+            if finite_idx.size > 0:
+                latest[j] = float(col[finite_idx[-1]])
+        return latest
+
+    def apply_stable_map_limits(
+        self,
+        ax,
+        x_latest: np.ndarray,
+        y_latest: np.ndarray,
+        x_target: float,
+        y_target: float,
+    ) -> None:
+        vals = []
+        for arr in (x_latest, y_latest):
+            arr = np.asarray(arr, dtype=float).ravel()
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                vals.append(arr)
+
+        if vals:
+            x_valid = np.asarray(x_latest, dtype=float)
+            y_valid = np.asarray(y_latest, dtype=float)
+            mask = np.isfinite(x_valid) & np.isfinite(y_valid)
+            dx = np.abs(x_valid[mask] - float(x_target)) if np.any(mask) else np.array([])
+            dy = np.abs(y_valid[mask] - float(y_target)) if np.any(mask) else np.array([])
+            span_needed = 0.0
+            if dx.size:
+                span_needed = max(span_needed, float(np.max(dx)))
+            if dy.size:
+                span_needed = max(span_needed, float(np.max(dy)))
+            half_span = max(10.0, 1.15 * span_needed + 5.0)
+            if self.map_half_span is None or not np.isfinite(self.map_half_span):
+                self.map_half_span = half_span
+            else:
+                self.map_half_span = max(float(self.map_half_span), half_span)
+        elif self.map_half_span is None or not np.isfinite(self.map_half_span):
+            self.map_half_span = 25.0
+
+        half_span = float(self.map_half_span)
+        ax.set_xlim(float(x_target) - half_span, float(x_target) + half_span)
+        ax.set_ylim(float(y_target) - half_span, float(y_target) + half_span)
 
     def profile_update(self, stage_s: dict[str, float]) -> None:
         """Update EMA timings and occasionally log a short breakdown."""
@@ -345,11 +406,21 @@ class LivePlotter:
 
         # --- Map ---
         ax = self.ax_map
-        x_meas = self.decimate_2d_rows(np.asarray(d.x_meas, dtype=float))
-        y_meas = self.decimate_2d_rows(np.asarray(d.y_meas, dtype=float))
-        if x_meas.ndim == 2 and y_meas.ndim == 2 and x_meas.size and y_meas.size:
-            ax.plot(x_meas, y_meas, 'x', linewidth=2)
+        x_meas = np.asarray(d.x_meas, dtype=float)
+        y_meas = np.asarray(d.y_meas, dtype=float)
+        x_latest = self.latest_valid_positions(x_meas)
+        y_latest = self.latest_valid_positions(y_meas)
+        mask_latest = np.isfinite(x_latest) & np.isfinite(y_latest)
+        if np.any(mask_latest):
+            ax.plot(
+                x_latest[mask_latest],
+                y_latest[mask_latest],
+                'x',
+                linewidth=2,
+                markersize=8,
+            )
         ax.plot([d.x_target], [d.y_target], 'ko', linewidth=2, markersize=6)
+        self.apply_stable_map_limits(ax, x_latest, y_latest, d.x_target, d.y_target)
 
         # Optional: indicate incident-wave direction and spreading at the target.
         if getattr(d, 'has_wavespec_bulk', False) and np.isfinite(d.wavespec_dp):

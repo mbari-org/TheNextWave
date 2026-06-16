@@ -5,7 +5,7 @@
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
-    rotation_deg: 180.0
+    rotation_deg: 0.0
     downsample_to_hz: 5.0
     wavespec_update_period_sec: 300.0
     # Only compute/publish dense_predictions_* for the last N seconds of the
@@ -17,18 +17,13 @@
     wec_actual_history_sec: 50.0
 
     # Least-squares solver tuning
-    lsq_ridge: 1.0e-6  # overall MAP prior scale
-                       # main effect is when use_spectrum_weighted_ridge is false
     lsq_max_iter: 60  # 60
     lsq_solver_backend: auto  # auto | jax | scipy
-    lsq_use_spectrum_weighted_ridge: true
-    lsq_spectrum_ridge_floor: 1.0e-6  # min per-component prior stddev (floor on ub); prevents
-                                      # infinite regularization on near-zero-energy components
     lsq_diagnostics_enable: false
     lsq_near_bound_ratio: 0.95
 
     # Optional MEM stabilization (disabled by default; diverges from MATLAB).
-    mem_moment_cap_enable: true
+    mem_moment_cap_enable: False
     mem_moment_cap: 0.999
 
     # Sim latent ingest noise floor (helps avoid MEM singularities on perfect waves).
@@ -58,12 +53,23 @@
       swift24: 3
       swift25: 4
 
+    # Optional simulator overrides for testing/debugging.
+    # These map onto mbari_wec empy launch inputs.
     wave_dir: 270.0  # 200.0
+
+    # SWIFT sample locations, mapped to empy `inc_wave_height_points`.
     swift_coords:
       x: [-125.0, -185.0, -100.0, 45.0]
       y: [-25.0, -115.0, -135.0, -175.0]
       # x: [-90.0, -37.0, -135.0, 8.0]
       # y: [-246.0, -103.0, -148.0, -201.0]
+
+    # Bretschneider incident wave settings, mapped to empy `inc_wave_spectrum`.
+    bretschneider:
+      Hs: 3.0
+      Tp: 14.0
+      n_phases: 500
+      spreading_deg: 22.0
 
 /the_next_wave_plotter_node:
   ros__parameters:

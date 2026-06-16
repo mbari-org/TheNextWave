@@ -23,7 +23,14 @@ import numpy as np
 from scipy.signal import find_peaks
 import xarray as xr
 
-from .download_example_data import get_example_data_dir
+from .download_example_data import (
+    get_default_example_name,
+    get_example_select_idx,
+    get_example_sbg_paths,
+    get_example_swift_paths,
+    load_example_sbg_bursts,
+    load_example_wavespec,
+)
 from .leastSquaresWavePropagation import leastSquaresWavePropagation
 from .swift import SWIFTArray, WaveSpec
 from .utilities import (
@@ -39,6 +46,12 @@ DEFAULT_MAX_ITERS = [1, 5, 15, 60]
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument(
+        '--example-name',
+        type=str,
+        default=None,
+        help='Folder name under example_data/ to use. Defaults to ExampleData1 when present, else the first available dataset.',
+    )
     p.add_argument(
         '--solver-max-iters',
         type=str,
@@ -127,35 +140,39 @@ def main():
     skipwarmup = 200
     burstend = 2740
 
-    example_data_dir = get_example_data_dir()
-    swiftdat = (
-        example_data_dir / 'SWIFT22_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat',
-        example_data_dir / 'SWIFT23_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat',
-        example_data_dir / 'SWIFT24_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat',
-        example_data_dir / 'SWIFT25_DIGIFLOAT_07Sep2022-04Oct2022_reprocessedSBG_displacements.mat',
-    )
-    sbgdat = (
-        example_data_dir / 'SWIFT22_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT23_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT24_SBG_12Sep2022_07_01.mat',
-        example_data_dir / 'SWIFT25_SBG_12Sep2022_07_01.mat',
-    )
+    example_name = args.example_name or get_default_example_name()
+    sbgdat = get_example_sbg_paths(example_name=example_name)
+    sbg_bursts = load_example_sbg_bursts(example_name=example_name)
 
-    select_idx = 91
-    swifts = SWIFTArray.from_mdat(swiftdat, sbgdat, select_idx)
+    print(f'example dataset: {example_name}')
 
-    all_bursts  = swifts.bursts(raw_sbg=False)
-    swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
-    wavespec_swift_idx = args.wavespec_swift  # 1-based or None
+    wavespec_base = load_example_wavespec(example_name=example_name)
+    print(f'wavespec for predictions: wavespec.mat from {example_name} (default)')
 
-    if wavespec_swift_idx is not None:
-        sel_burst = all_bursts[wavespec_swift_idx - 1]
-        sel_label = swift_names[wavespec_swift_idx - 1]
-        wavespec_base = build_wavespec_from_swifts([sel_burst], recip=True)
-        print(f'wavespec for predictions: {sel_label} (--wavespec-swift {wavespec_swift_idx})')
-    else:
-        wavespec_base = build_wavespec_from_swifts(all_bursts, recip=True)
-        print('wavespec for predictions: mean of all 4 SWIFTs (default)')
+    swiftdat = get_example_swift_paths(example_name=example_name)
+    if args.wavespec_swift is not None:
+        if swiftdat is None:
+            print(
+                'WARNING: --wavespec-swift requested, but this example bundle does not '
+                'include per-buoy processed SWIFT files; using wavespec.mat instead'
+            )
+        else:
+            swifts = SWIFTArray.from_mdat(
+                swiftdat,
+                sbgdat,
+                get_example_select_idx(example_name=example_name),
+            )
+            all_bursts = swifts.bursts(raw_sbg=False)
+            swift_names = ['SWIFT22', 'SWIFT23', 'SWIFT24', 'SWIFT25']
+            wavespec_swift_idx = args.wavespec_swift
+            sel_burst = all_bursts[wavespec_swift_idx - 1]
+            sel_label = swift_names[wavespec_swift_idx - 1]
+            wavespec_base = build_wavespec_from_swifts([sel_burst], recip=True)
+            print(
+                f'wavespec for predictions overridden with {sel_label} '
+                f'(--wavespec-swift {wavespec_swift_idx})'
+            )
+
     Te, ce = centroid_period_and_phase_speed(wavespec_base)
     wavespec_bulk = bulk_wave_params_from_wavespec(wavespec_base)
     print(format_bulk_wave_params(wavespec_bulk, 'wavespec'))
@@ -164,7 +181,7 @@ def main():
     BUOY_LABELS = ['swift22', 'swift23', 'swift24', 'swift25']
 
     zin_all, uin_all, vin_all, tin_all, xin_all, yin_all, fs = load_raw_arrays_from_sbg(
-        swifts.bursts(raw_sbg=True),
+        sbg_bursts,
         skipwarmup,
         burstend,
         latorigin,
@@ -468,22 +485,8 @@ def main():
                     ypred.reshape((-1, 1)),
                     ws,
                     A0=A0_list[iter_idx],
-                    A0_active_indices=None,
                     max_iter=mi,
                     solver_backend=solver_backend,
-                    ridge=0.0,
-                    use_spectrum_weighted_ridge=False,
-                    spectrum_ridge_floor=1e-6,
-                    gtol=0.1,
-                    lambda_time=0.0,
-                    lambda_freq_smooth=0.0,
-                    lambda_theta_smooth=0.0,
-                    freq_energy_frac=0.0,
-                    dir_energy_frac=0.0,
-                    active_grid_pad=1,
-                    use_rank_reduction=False,
-                    use_row_scale=False,
-                    use_col_scale=False,
                 )
                 A0_list[iter_idx] = params.A
                 print(f'  max_iter={mi:4d}  solve_time={comp_time:.3f}s')
