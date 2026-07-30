@@ -6,7 +6,7 @@
       swift22: 3003
       swift23: 3004
       swift24: 3001
-      swift25: 3002
+      swift25: 3005  # 3002
 
 /the_next_wave_node:
   ros__parameters:

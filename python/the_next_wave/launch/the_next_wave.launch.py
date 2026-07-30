@@ -5,7 +5,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
 from launch.actions import LogInfo, SetLaunchConfiguration
 from launch.actions import SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
@@ -20,6 +20,15 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
+
+def timestamp():
+    from datetime import datetime, timezone
+
+    stamp_dt = datetime.now(timezone.utc)
+    stamp_pre = ''.join([str(d).zfill(2) for d in [stamp_dt.year, stamp_dt.month, stamp_dt.day]])
+    stamp_post = ''.join([str(d).zfill(2) for d in [stamp_dt.hour, stamp_dt.minute, stamp_dt.second]])
+    stamp = stamp_pre+'-'+stamp_post
+    return stamp
 
 def load_incwave_config() -> tuple[str, str, str, bool]:
     def stringify_number(value) -> str:
@@ -405,6 +414,16 @@ def generate_launch_description() -> LaunchDescription:
                     'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
                 condition=IfCondition(enable_sbg_tcp_replay),
             ),
+
+            # ROS Bag
+            ExecuteProcess(
+                cmd=['ros2', 'bag', 'record', '-a', '-b', '10000000',
+                     '--compression-mode', 'file',
+                     '--compression-format', 'zstd',
+                     '-o', '/mnt/nvme/data/ros2/bags/next_wave_and_pb_ros2_{stamp}.bag'.format(stamp=timestamp())],
+                output={'both': 'log'}
+            ),
+
             # main predictor node
             Node(
                 package='the_next_wave',

@@ -76,7 +76,7 @@ def iter_sbg_headers(
         yield msg_id, msg_class
 
 
-def main(bind: str = '0.0.0.0', port: int = 3001) -> None:  # pragma: no cover
+def main(bind: str = '0.0.0.0', port: int = 3002) -> None:  # pragma: no cover
     """Run the original standalone TCP decoder server."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_address = (bind, int(port))
@@ -102,4 +102,5 @@ def main(bind: str = '0.0.0.0', port: int = 3001) -> None:  # pragma: no cover
 
 
 if __name__ == '__main__':  # pragma: no cover
-    main()
+    import sys
+    main(bind=sys.argv[1], port=int(sys.argv[2]))

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from collections import OrderedDict
+from copy import deepcopy
 import socket
 import threading
 import time
@@ -10,6 +11,7 @@ import rclpy
 
 from . import sbgMessageParse
 from .readAndDecodeFromEthernetBridge import iter_sbg_headers
+from .rolling_csv_logger import RollingCsvLogger
 
 
 class SbgBridgeService:
@@ -34,6 +36,12 @@ class SbgBridgeService:
         self.threads: list[threading.Thread] = []
         self.partial_by_swift: dict[int, 'OrderedDict[int, dict]'] = {}
         self.last_warn_walltime_by_swift: dict[int, float] = {}
+        self.swift_data_logger = {
+                22: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift22_parsed.csv')
+                23: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift23_parsed.csv')
+                24: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift24_parsed.csv')
+                25: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift25_parsed.csv')
+            }
 
     def start(self, swift_nums: list[int]) -> None:
         for swift_num in swift_nums:
@@ -126,40 +134,106 @@ class SbgBridgeService:
             self.handle_message(swift_num, msg_id, data_struct)
 
     def handle_message(self, swift_num: int, msg_id: bytes, data_struct: dict) -> None:
+        # print('handler got message:', swift_num, msg_id, data_struct)
+        id2name = {
+            b'\x01': 'Status',
+            b'\x02': 'UtcTime',
+            b'\x03': 'ImuData',
+            b'\x04': 'Mag',
+            b'\x06': 'EkfEuler',
+            b'\x07': 'EkfQuat',
+            b'\x08': 'EkfNav',
+            b'\x09': 'ShipMotion',
+            b'\x0d': 'GpsVel',
+            b'\x0e': 'GpsPos',
+        }
+
+        message_name = id2name.get(msg_id)
+        if message_name not in ('ShipMotion', 'GpsVel', 'GpsPos'):
+            return
+
         try:
             t_us = int(data_struct.get('time_stamp'))
-        except Exception:
+            #if msg_id in [b'\x09', b'\x0d', b'\x0e']:
+            #    print(f'[{time.monotonic()}] handler got {id2name[msg_id]}: message time = {t_us}')
+            #else:
+            #    print('handler got unknown msg_id:', msg_id)
+
+            now = time.monotonic()
+            log_data = deepcopy(data_struct)
+            log_data.update({'handle_time': now, 'swift_id': swift_num, 'msg_id': f'\\x{msg_id[0]:02x}, 'msg_name': id2name[msg_id]})
+            first_fields = [
+                    'time_stamp',
+                    'handle_time',
+                    'swift_id',
+                    'msg_id',
+                    'msg_name',
+                ]
+            if self.swift_data_logger[swift_num] is None:
+                self.swift_data_logger[swift_num] = dict()
+            elif id2name[msg_id] not in self.swift_data_logger[swift_num]:
+                self.swift_data_logger[swift_num].update({id2name[msg_id]: RollingCsvLogger(
+                    f'/mnt/nvme/data/swifts/parsed/swift{swift_num}/{id2name[msg_id]}_parsed.csv',
+                    fieldnames=first_fields + sorted(list(set(log_data.keys()) - set(first_fields))),
+                    when='H',
+                    interval=1,
+                    utc=True,
+                    max_bytes=0,
+                )})
+            self.swift_data_logger[swift_num][id2name[msg_id]].write(log_data)
+        except Exception as err:
+            print('exception in bridge handle_message:', err)
             return
 
         with self.data_lock:
             partial = self.partial_by_swift.setdefault(swift_num, OrderedDict())
-            rec = partial.get(t_us)
-            if rec is None:
-                rec = {'t_us': t_us}
-                partial[t_us] = rec
+            message_fields = {
+                'ShipMotion': ('z',),
+                'GpsVel': ('u', 'v'),
+                'GpsPos': ('lat', 'lon'),
+            }[message_name]
+            rec_key = None
+            rec = None
+            best_distance = 100_001
+            for candidate_key, candidate_rec in partial.items():
+                if any(field in candidate_rec for field in message_fields):
+                    continue
+                distance = abs(t_us - candidate_key)
+                if distance <= 100_000 and distance < best_distance:
+                    rec_key = candidate_key
+                    rec = candidate_rec
+                    best_distance = distance
 
-            if msg_id == b'\x09':
+            if rec is None:
+                rec_key = t_us
+                rec = {'t_us': t_us}
+                partial[rec_key] = rec
+
+            if message_name == 'ShipMotion':
                 try:
                     rec['z'] = float(data_struct.get('heave'))
-                except Exception:
-                    pass
-            elif msg_id == b'\x0d':
+                    rec['ship_motion_t_us'] = t_us
+                except Exception as err:
+                    print('handle message error:', err)
+            elif message_name == 'GpsVel':
                 try:
                     rec['u'] = float(data_struct.get('vel_e'))
                     rec['v'] = float(data_struct.get('vel_n'))
-                except Exception:
-                    pass
-            elif msg_id == b'\x0e':
+                    rec['gps_vel_t_us'] = t_us
+                except Exception as err:
+                    print('handle message error:', err)
+            elif message_name == 'GpsPos':
                 try:
                     rec['lat'] = float(data_struct.get('lat'))
                     rec['lon'] = float(data_struct.get('long'))
-                except Exception:
-                    pass
+                    rec['gps_pos_t_us'] = t_us
+                except Exception as err:
+                    print('handle message error:', err)
 
             if all(k in rec for k in ('z', 'u', 'v', 'lat', 'lon')):
                 self.ingest_swift_sample_locked(
                     swift_num=swift_num,
-                    t_us=float(rec['t_us']),
+                    t_us=float((rec['gps_vel_t_us'] + rec['gps_pos_t_us']) / 2.0),
                     z=float(rec['z']),
                     u=float(rec['u']),
                     v=float(rec['v']),
@@ -167,12 +241,18 @@ class SbgBridgeService:
                     lon=float(rec['lon']),
                 )
                 try:
-                    del partial[t_us]
-                except Exception:
+                    del partial[rec_key]
+                except Exception as err:
+                    print('handle message error:', err)
                     pass
+            else:
+                pass
+                #print('handler has not received:', list(set(('z', 'u', 'v', 'lat', 'lon')) - set(rec.keys())))
+
 
             while len(partial) > 100:
                 try:
                     partial.popitem(last=False)
-                except Exception:
+                except Exception as err:
+                    print('handle message error:', err)
                     break
