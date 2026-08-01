@@ -2,6 +2,7 @@
 
 from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime, timezone
 import socket
 import threading
 import time
@@ -12,6 +13,24 @@ import rclpy
 from . import sbgMessageParse
 from .readAndDecodeFromEthernetBridge import iter_sbg_headers
 from .rolling_csv_logger import RollingCsvLogger
+
+
+def utc_message_to_epoch_us(data_struct: dict) -> float:
+    minute_start = datetime(
+        year=data_struct.get('year'),
+        month=data_struct.get('month'),
+        day=data_struct.get('day'),
+        hour=data_struct.get('hour'),
+        minute=data_struct.get('min'),
+        second=0,
+        tzinfo=timezone.utc,
+    )
+
+    return (
+        minute_start.timestamp() * 1e6
+        + data_struct.get('sec') * 1e6
+        + data_struct.get('nanosec') * 1e-3
+    )
 
 
 class SbgBridgeService:
@@ -34,13 +53,15 @@ class SbgBridgeService:
 
         self.stop_event = threading.Event()
         self.threads: list[threading.Thread] = []
-        self.partial_by_swift: dict[int, 'OrderedDict[int, dict]'] = {}
+        self.partial_by_swift: dict[int, dict] = {}
+        self.last_status_t_us_by_swift: dict[int, int] = {}
+        self.burst_start_t_us_by_swift: dict[int, int] = {}
         self.last_warn_walltime_by_swift: dict[int, float] = {}
         self.swift_data_logger = {
-                22: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift22_parsed.csv')
-                23: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift23_parsed.csv')
-                24: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift24_parsed.csv')
-                25: None,  # RollingCsvLogger('/mnt/nvme/data/swifts/parsed/swift25_parsed.csv')
+                22: None,
+                23: None,
+                24: None,
+                25: None,
             }
 
     def start(self, swift_nums: list[int]) -> None:
@@ -57,6 +78,19 @@ class SbgBridgeService:
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def roll_swift_data_loggers(self, swift_num: int) -> None:
+        if self.swift_data_logger[swift_num] is None:
+            return
+
+        for message_name, data_logger in self.swift_data_logger[swift_num].items():
+            try:
+                data_logger.roll()
+            except Exception as err:
+                self.logger.error(
+                    f'swift{swift_num} failed to roll '
+                    f'{message_name} CSV log: {err}'
+                )
 
     def server_thread(self, swift_num: int, bind: str, port: int) -> None:
         server_sock = None
@@ -148,111 +182,109 @@ class SbgBridgeService:
             b'\x0e': 'GpsPos',
         }
 
-        message_name = id2name.get(msg_id)
-        if message_name not in ('ShipMotion', 'GpsVel', 'GpsPos'):
+        if msg_id not in id2name:
             return
+
+        message_name = id2name[msg_id]
 
         try:
             t_us = int(data_struct.get('time_stamp'))
-            #if msg_id in [b'\x09', b'\x0d', b'\x0e']:
-            #    print(f'[{time.monotonic()}] handler got {id2name[msg_id]}: message time = {t_us}')
-            #else:
-            #    print('handler got unknown msg_id:', msg_id)
 
-            now = time.monotonic()
+            if message_name == 'Status':
+                last_status_t_us = self.last_status_t_us_by_swift.get(swift_num)
+
+                if last_status_t_us is None:
+                    self.burst_start_t_us_by_swift[swift_num] = t_us
+                elif t_us < last_status_t_us:
+                    self.roll_swift_data_loggers(swift_num)
+                    self.burst_start_t_us_by_swift[swift_num] = t_us
+
+                self.last_status_t_us_by_swift[swift_num] = t_us
+
+            now = time.time()
             log_data = deepcopy(data_struct)
-            log_data.update({'handle_time': now, 'swift_id': swift_num, 'msg_id': f'\\x{msg_id[0]:02x}, 'msg_name': id2name[msg_id]})
+            log_data.update({
+                'handle_time': now,
+                'swift_id': swift_num,
+                'msg_id': ''.join(f'\\x{byte:02x}' for byte in msg_id),
+                'msg_name': message_name,
+            })
             first_fields = [
-                    'time_stamp',
                     'handle_time',
+                    'time_stamp',
                     'swift_id',
                     'msg_id',
                     'msg_name',
                 ]
             if self.swift_data_logger[swift_num] is None:
                 self.swift_data_logger[swift_num] = dict()
-            elif id2name[msg_id] not in self.swift_data_logger[swift_num]:
-                self.swift_data_logger[swift_num].update({id2name[msg_id]: RollingCsvLogger(
-                    f'/mnt/nvme/data/swifts/parsed/swift{swift_num}/{id2name[msg_id]}_parsed.csv',
-                    fieldnames=first_fields + sorted(list(set(log_data.keys()) - set(first_fields))),
-                    when='H',
-                    interval=1,
-                    utc=True,
-                    max_bytes=0,
-                )})
+            if id2name[msg_id] not in self.swift_data_logger[swift_num]:
+                self.swift_data_logger[swift_num].update(
+                    {
+                        id2name[msg_id]: RollingCsvLogger(
+                            f'/mnt/nvme/data/swifts/parsed/swift{swift_num}/{id2name[msg_id]}_parsed.csv',
+                            fieldnames=first_fields + sorted(list(set(log_data.keys()) - set(first_fields))),
+                        )
+                    }
+                )
             self.swift_data_logger[swift_num][id2name[msg_id]].write(log_data)
         except Exception as err:
             print('exception in bridge handle_message:', err)
             return
 
         with self.data_lock:
-            partial = self.partial_by_swift.setdefault(swift_num, OrderedDict())
-            message_fields = {
-                'ShipMotion': ('z',),
-                'GpsVel': ('u', 'v'),
-                'GpsPos': ('lat', 'lon'),
-            }[message_name]
-            rec_key = None
-            rec = None
-            best_distance = 100_001
-            for candidate_key, candidate_rec in partial.items():
-                if any(field in candidate_rec for field in message_fields):
-                    continue
-                distance = abs(t_us - candidate_key)
-                if distance <= 100_000 and distance < best_distance:
-                    rec_key = candidate_key
-                    rec = candidate_rec
-                    best_distance = distance
-
-            if rec is None:
-                rec_key = t_us
+            if message_name == 'Status':
                 rec = {'t_us': t_us}
-                partial[rec_key] = rec
+                self.partial_by_swift[swift_num] = rec
+            else:
+                rec = self.partial_by_swift.get(swift_num)
+                if rec is None:
+                    return
 
-            if message_name == 'ShipMotion':
+            if id2name[msg_id] == 'UtcTime':
                 try:
-                    rec['z'] = float(data_struct.get('heave'))
-                    rec['ship_motion_t_us'] = t_us
+                    rec['t_utc'] = utc_message_to_epoch_us(data_struct)
                 except Exception as err:
                     print('handle message error:', err)
-            elif message_name == 'GpsVel':
+            elif id2name[msg_id] == 'ShipMotion':
+                try:
+                    rec['z'] = float(data_struct.get('heave'))
+                except Exception as err:
+                    print('handle message error:', err)
+            elif id2name[msg_id] == 'GpsVel':
                 try:
                     rec['u'] = float(data_struct.get('vel_e'))
                     rec['v'] = float(data_struct.get('vel_n'))
-                    rec['gps_vel_t_us'] = t_us
                 except Exception as err:
                     print('handle message error:', err)
-            elif message_name == 'GpsPos':
+            elif id2name[msg_id] == 'GpsPos':
                 try:
                     rec['lat'] = float(data_struct.get('lat'))
                     rec['lon'] = float(data_struct.get('long'))
-                    rec['gps_pos_t_us'] = t_us
                 except Exception as err:
                     print('handle message error:', err)
 
-            if all(k in rec for k in ('z', 'u', 'v', 'lat', 'lon')):
-                self.ingest_swift_sample_locked(
-                    swift_num=swift_num,
-                    t_us=float((rec['gps_vel_t_us'] + rec['gps_pos_t_us']) / 2.0),
-                    z=float(rec['z']),
-                    u=float(rec['u']),
-                    v=float(rec['v']),
-                    lat=float(rec['lat']),
-                    lon=float(rec['lon']),
+                burst_start_t_us = self.burst_start_t_us_by_swift.get(
+                    swift_num,
+                    rec['t_us'],
                 )
+
+                if (
+                    rec['t_us'] - burst_start_t_us >= 45_000_000
+                    and all(k in rec for k in ('z', 'u', 'v', 'lat', 'lon', 't_utc'))
+                ):
+                    self.ingest_swift_sample_locked(
+                        swift_num=swift_num,
+                        t_us=float(rec['t_utc']),
+                        z=float(rec['z']),
+                        u=float(rec['u']),
+                        v=float(rec['v']),
+                        lat=float(rec['lat']),
+                        lon=float(rec['lon']),
+                    )
+
                 try:
-                    del partial[rec_key]
+                    del self.partial_by_swift[swift_num]
                 except Exception as err:
                     print('handle message error:', err)
                     pass
-            else:
-                pass
-                #print('handler has not received:', list(set(('z', 'u', 'v', 'lat', 'lon')) - set(rec.keys())))
-
-
-            while len(partial) > 100:
-                try:
-                    partial.popitem(last=False)
-                except Exception as err:
-                    print('handle message error:', err)
-                    break

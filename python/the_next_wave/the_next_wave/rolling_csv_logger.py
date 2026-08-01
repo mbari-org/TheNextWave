@@ -1,190 +1,16 @@
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
 import csv
-import io
-import logging
+import gzip
 import os
-import threading
-import traceback
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
+import shutil
+import threading
 from typing import Any
-
-from concurrent_log_handler import ConcurrentTimedRotatingFileHandler
-
-
-def _encode_csv_row(values: Sequence[Any]) -> str:
-    """
-    Encode one CSV row without the final newline.
-    """
-    output = io.StringIO(newline="")
-    csv.writer(output, lineterminator="\n").writerow(values)
-    return output.getvalue().removesuffix("\n")
-
-
-class DictCsvFormatter(logging.Formatter):
-    def __init__(
-        self,
-        fieldnames: Sequence[str],
-        *,
-        extrasaction: str = "raise",
-    ) -> None:
-        super().__init__()
-        self.fieldnames = tuple(fieldnames)
-        self.extrasaction = extrasaction
-
-    def format(self, record: logging.LogRecord) -> str:
-        row = getattr(record, "csv_row", None)
-
-        if not isinstance(row, Mapping):
-            raise TypeError("csv_row must be a mapping")
-
-        output = io.StringIO(newline="")
-
-        writer = csv.DictWriter(
-            output,
-            fieldnames=self.fieldnames,
-            extrasaction=self.extrasaction,
-            restval="",
-            lineterminator="\n",
-        )
-        writer.writerow(row)
-
-        return output.getvalue().removesuffix("\n")
-
-
-class HeaderTimedRotatingFileHandler(
-    ConcurrentTimedRotatingFileHandler
-):
-    """
-    Concurrent timed rotation with:
-
-    - gzip compression;
-    - unlimited archive retention;
-    - a CSV header in every file;
-    - timestamped archive names.
-    """
-
-    def __init__(
-        self,
-        filename: str | os.PathLike[str],
-        *,
-        csv_header: str,
-        when: str = "H",
-        interval: int = 1,
-        utc: bool = True,
-        max_bytes: int = 0,
-    ) -> None:
-        self.csv_header = csv_header
-
-        super().__init__(
-            filename=filename,
-            when=when,
-            interval=interval,
-
-            # For the timed handler, zero means do not delete archives.
-            backupCount=0,
-
-            encoding="utf-8",
-            delay=True,
-            utc=utc,
-
-            # Zero means time-only rotation. A positive value adds
-            # size-based rotation in addition to timed rotation.
-            maxBytes=max_bytes,
-
-            use_gzip=True,
-            newline="",
-            terminator="\n",
-        )
-
-    def finalize_handler_configuration(self) -> None:
-        """
-        Configure archive names before rollover initialization.
-
-        Example UTC filename:
-            vehicle.20260730T050000Z.csv.gz
-        """
-        super().finalize_handler_configuration()
-
-        if self.utc:
-            self.suffix = "%Y%m%dT%H%M%SZ"
-        else:
-            self.suffix = "%Y%m%dT%H%M%S"
-
-        self.namer = self._archive_namer
-
-    def _archive_namer(self, default_name: str) -> str:
-        """
-        Convert:
-
-            vehicle.csv.20260730T050000Z
-
-        into:
-
-            vehicle.20260730T050000Z.csv
-
-        Gzip subsequently adds .gz.
-        """
-        prefix = self.baseFilename + "."
-
-        if not default_name.startswith(prefix):
-            return default_name
-
-        timestamp = default_name[len(prefix):]
-        base = Path(self.baseFilename)
-
-        return str(
-            base.with_name(
-                f"{base.stem}.{timestamp}{base.suffix}"
-            )
-        )
-
-    def _write_header_if_empty_locked(self) -> None:
-        """
-        Write the header if the active file is absent or empty.
-
-        The concurrent handler lock must already be held.
-        """
-        try:
-            empty = os.path.getsize(self.baseFilename) == 0
-        except FileNotFoundError:
-            empty = True
-
-        if empty:
-            self.clh.do_write(self.csv_header)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        """
-        Rotate if necessary, then atomically write the header and row.
-        """
-        try:
-            msg = self.format(record)
-
-            try:
-                self.clh._do_lock()
-                self.clh._check_stream()
-
-                try:
-                    if self.shouldRollover(record):
-                        self.doRollover()
-                except Exception as exc:
-                    self._console_log(
-                        f"Unable to do rollover: {exc}\n"
-                        f"{traceback.format_exc()}"
-                    )
-
-                # This happens after rollover but before the first data row.
-                self._write_header_if_empty_locked()
-                self.clh.do_write(msg)
-
-            finally:
-                self.clh._do_unlock()
-
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            self.handleError(record)
 
 
 class RollingCsvLogger:
@@ -193,77 +19,37 @@ class RollingCsvLogger:
         filename: str | os.PathLike[str],
         fieldnames: Sequence[str],
         *,
-        when: str = "H",
-        interval: int = 1,
-        utc: bool = True,
-        max_bytes: int = 0,
-        extrasaction: str = "raise",
+        extrasaction: str = 'raise',
+        compresslevel: int = 6,
     ) -> None:
-        fields = tuple(fieldnames)
-
-        if not fields:
-            raise ValueError("fieldnames cannot be empty")
-
-        if any(
-            not isinstance(field, str) or not field
-            for field in fields
-        ):
-            raise ValueError(
-                "every field name must be a non-empty string"
-            )
-
-        if len(set(fields)) != len(fields):
-            raise ValueError("fieldnames must be unique")
-
-        if extrasaction not in {"raise", "ignore"}:
-            raise ValueError(
-                "extrasaction must be 'raise' or 'ignore'"
-            )
-
-        if interval < 1:
-            raise ValueError("interval must be at least 1")
-
-        if max_bytes < 0:
-            raise ValueError("max_bytes cannot be negative")
-
         self.path = Path(filename).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.fieldnames = fields
-        self._closed = False
+        self.fieldnames = tuple(fieldnames)
+        self.extrasaction = extrasaction
+        self.compresslevel = int(compresslevel)
+
+        if not self.fieldnames:
+            raise ValueError('fieldnames cannot be empty')
+
+        if len(set(self.fieldnames)) != len(self.fieldnames):
+            raise ValueError('fieldnames must be unique')
+
+        if self.extrasaction not in ('raise', 'ignore'):
+            raise ValueError("extrasaction must be 'raise' or 'ignore'")
+
+        if not 0 <= self.compresslevel <= 9:
+            raise ValueError('compresslevel must be between 0 and 9')
+
         self._lock = threading.RLock()
+        self._closed = False
+        self._file = None
+        self._writer = None
 
         self._validate_existing_header()
-
-        self._handler = HeaderTimedRotatingFileHandler(
-            self.path,
-            csv_header=_encode_csv_row(self.fieldnames),
-            when=when,
-            interval=interval,
-            utc=utc,
-            max_bytes=max_bytes,
-        )
-
-        self._handler.setFormatter(
-            DictCsvFormatter(
-                self.fieldnames,
-                extrasaction=extrasaction,
-            )
-        )
-
-        # Standalone logger avoids conflicts with globally registered
-        # logging.Logger instances.
-        self._logger = logging.Logger(
-            name=f"rolling-csv:{self.path}",
-            level=logging.INFO,
-        )
-        self._logger.propagate = False
-        self._logger.addHandler(self._handler)
+        self._open_file()
 
     def _validate_existing_header(self) -> None:
-        """
-        Refuse to append if the existing active CSV has another schema.
-        """
         try:
             if self.path.stat().st_size == 0:
                 return
@@ -271,36 +57,156 @@ class RollingCsvLogger:
             return
 
         with self.path.open(
-            "r",
-            encoding="utf-8",
-            newline="",
+            'r',
+            encoding='utf-8',
+            newline='',
         ) as file:
-            existing_header = tuple(next(csv.reader(file)))
+            try:
+                existing_header = tuple(next(csv.reader(file)))
+            except StopIteration:
+                return
 
         if existing_header != self.fieldnames:
             raise ValueError(
-                "Existing CSV header does not match fieldnames:\n"
-                f"existing:   {existing_header}\n"
-                f"configured: {self.fieldnames}"
+                'Existing CSV header does not match configured fieldnames:\n'
+                f'existing:   {existing_header}\n'
+                f'configured: {self.fieldnames}'
             )
+
+    def _open_file(self) -> None:
+        has_content = self.path.exists() and self.path.stat().st_size > 0
+
+        self._file = self.path.open(
+            'a',
+            encoding='utf-8',
+            newline='',
+        )
+
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=self.fieldnames,
+            extrasaction=self.extrasaction,
+            restval='',
+            lineterminator='\n',
+        )
+
+        if not has_content:
+            self._writer.writeheader()
+            self._file.flush()
+
+    def _close_file(self) -> None:
+        if self._file is None:
+            return
+
+        self._file.flush()
+        self._file.close()
+
+        self._file = None
+        self._writer = None
+
+    @staticmethod
+    def _normalize_value(value: Any) -> Any:
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return ''.join(f'\\x{byte:02x}' for byte in bytes(value))
+
+        return value
+
+    def _normalize_row(
+        self,
+        row: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            key: self._normalize_value(value)
+            for key, value in row.items()
+        }
+
+    def _archive_path(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime(
+            '%Y%m%dT%H%M%S.%fZ'
+        )
+
+        sequence = 0
+
+        while True:
+            suffix = '' if sequence == 0 else f'.{sequence}'
+
+            archive = self.path.with_name(
+                f'{self.path.stem}.{timestamp}'
+                f'{suffix}{self.path.suffix}'
+            )
+
+            compressed = Path(f'{archive}.gz')
+
+            if not archive.exists() and not compressed.exists():
+                return archive
+
+            sequence += 1
 
     def write(self, row: Mapping[str, Any]) -> None:
         if not isinstance(row, Mapping):
-            raise TypeError("row must be a mapping")
+            raise TypeError('row must be a mapping')
 
         with self._lock:
             if self._closed:
-                raise RuntimeError("logger is closed")
+                raise RuntimeError('logger is closed')
 
-            self._logger.info(
-                "",
-                extra={"csv_row": dict(row)},
-            )
+            assert self._writer is not None
+            assert self._file is not None
+
+            self._writer.writerow(self._normalize_row(row))
+            self._file.flush()
+
+    def roll(self) -> Path | None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('logger is closed')
+
+            self._close_file()
+
+            archive = None
+            compressed = None
+            temporary = None
+
+            try:
+                if self.path.exists() and self.path.stat().st_size > 0:
+                    archive = self._archive_path()
+                    compressed = Path(f'{archive}.gz')
+                    temporary = Path(f'{compressed}.tmp')
+
+                    os.replace(self.path, archive)
+
+                    try:
+                        with archive.open('rb') as source:
+                            with gzip.open(
+                                temporary,
+                                'wb',
+                                compresslevel=self.compresslevel,
+                            ) as destination:
+                                shutil.copyfileobj(source, destination)
+
+                        os.replace(temporary, compressed)
+                        archive.unlink()
+
+                    except Exception:
+                        try:
+                            temporary.unlink()
+                        except FileNotFoundError:
+                            pass
+
+                        raise
+
+            finally:
+                self._open_file()
+
+            return compressed
 
     def flush(self) -> None:
         with self._lock:
-            if not self._closed:
-                self._handler.flush()
+            if self._closed:
+                return
+
+            assert self._file is not None
+            self._file.flush()
 
     def close(self) -> None:
         with self._lock:
@@ -308,8 +214,7 @@ class RollingCsvLogger:
                 return
 
             self._closed = True
-            self._logger.removeHandler(self._handler)
-            self._handler.close()
+            self._close_file()
 
     def __enter__(self) -> RollingCsvLogger:
         return self
