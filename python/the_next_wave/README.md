@@ -140,10 +140,15 @@ ros2 launch the_next_wave the_next_wave.launch.py \
    params_file:=/absolute/path/to/my_config.yaml
 ```
 
+The chosen params file drives **both** the predictor node parameters and the
+simulator incident-wave overrides (`wave_dir`, `swift_coords`, `bretschneider`),
+so `params_file:=...` is enough to switch wave conditions between runs.
+
 #### How to specify incident-wave overrides in ROS launch mode
 
-For the top-level TheNextWave launch, the simulator overrides are read from
-[config/config.yaml](config/config.yaml):
+For the top-level TheNextWave launch, the simulator overrides are read from the
+effective params file — [config/config.yaml](config/config.yaml) by default, or
+whatever `params_file:=` selects:
 
 - `wave_dir`: incident-wave direction in compass degrees True, waves coming **FROM**
 - `swift_coords.x` / `swift_coords.y`: simulated SWIFT buoy sample locations in local meters; mapped to simulator `inc_wave_height_points`
@@ -209,6 +214,75 @@ Notes:
 - `spreading_deg` uses the SWIFT / Spotter first-moment spread convention.
 - `spreading_deg: 0` disables directional spreading and falls back to a 1D Bretschneider spectrum.
 - `n_phases` is the number of random phases used for the Bretschneider realization; it is not the same as the number of spreading sectors.
+
+### Logging sim runs to CSV (unspread vs. spread comparison)
+
+Two ready-made configs differ **only** in `bretschneider.spreading_deg`, so a
+pair of runs isolates the effect of directional spreading:
+
+| Config | `spreading_deg` | Incident waves |
+| --- | --- | --- |
+| [config/config_sim_nospread.yaml](config/config_sim_nospread.yaml) | `0.0` | single direction (long-crested) |
+| [config/config_sim_spread.yaml](config/config_sim_spread.yaml) | `22.0` | directionally spread (short-crested) |
+
+Everything else matches [config/config.yaml](config/config.yaml): `wave_dir: 270`,
+`Hs: 3.0`, `Tp: 14.0`, `n_phases: 500`, and the same four SWIFT positions.
+
+[scripts/run_sim_cases.sh](scripts/run_sim_cases.sh) runs both cases back to
+back, records a rosbag per case, and exports CSVs:
+
+``` bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+export PYTHONPATH="$PYTHONPATH:$PWD/install/gz_sim_vendor/opt/gz_sim_vendor/lib/python:$PWD/install/gz_math_vendor/opt/gz_math_vendor/lib/python"
+
+src/TheNextWave/python/the_next_wave/scripts/run_sim_cases.sh -d 600 -x
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-d SIM_SECONDS` | simulated seconds per case (default 600; ~256 s fills the window before the first prediction) |
+| `-o OUT_DIR` | output directory (default `sim_runs/<timestamp>` under this package) |
+| `-c CASES` | comma-separated subset, e.g. `-c nospread` |
+| `-H` | show the Gazebo GUI (headless by default) |
+| `-x` | also export the dense and spectrum CSVs |
+
+The script refuses to start if the environment is wrong. **Do not overwrite
+`PYTHONPATH` after sourcing `install/setup.bash`** — the predictor node reads its
+console-script metadata from `install/the_next_wave/lib/python3.12/site-packages`,
+and clobbering `PYTHONPATH` makes the node die at startup while Gazebo keeps
+running, silently producing a bag with `/latent_data` but no `/wave_predictions`.
+
+Recorded topics, per case:
+
+- `/latent_data` — simulator incident-wave truth. Index 0 is the target WEC, indices 1–4 are the SWIFTs (per the `swifts` mapping in the config). This is the predictor's **input**.
+- `/wave_predictions` — `WavePredictionOutput`, the predictor's **output**.
+
+Exported files (`<case>` is `nospread` or `spread`):
+
+| File | Rows | Contents |
+| --- | --- | --- |
+| `<case>_input.csv` | one per (sample time × point) | `label`, `x_m`, `y_m`, `z_m`, `u_east_mps`, `v_north_mps`, `etadot_mps` |
+| `<case>_output.csv` | one per predicted sample | prediction time/position/elevation/velocity, plus that window's bulk wavespec (`Hs`, `Tp`, `Tm01`, `Tm02`, `Dp`, `Dm`, spread) and solver diagnostics |
+| `<case>_dense.csv` (`-x`) | one per dense sample | in-window model projection at the target, for phase comparison against truth |
+| `<case>_spectrum.csv` (`-x`) | one per frequency bin | 1D energy spectrum per window |
+
+To compare prediction against truth, join `<case>_output.csv` on `pred_time_s`
+with the `label == 'target'` rows of `<case>_input.csv` (`sample_time_s`). Both
+use the same absolute sim-time base.
+
+A quick sanity check on the unspread case: with `wave_dir: 270` (waves from the
+west) and no spreading, `v_north_mps` is identically zero in `nospread_input.csv`
+and nonzero in `spread_input.csv`.
+
+To re-export CSVs from a bag you already have, run the converter directly:
+
+``` bash
+python3 scripts/bag_to_csv.py <bag_dir> \
+   --prefix /path/to/out/nospread \
+   --config config/config_sim_nospread.yaml \
+   --dense --spectrum
+```
 
 ## Example
 Install `pooch` to download example data:

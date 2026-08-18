@@ -21,7 +21,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-def load_incwave_config() -> tuple[str, str, str, bool]:
+def load_incwave_config(config_path: str | None = None) -> tuple[str, str, str, bool]:
     def stringify_number(value) -> str:
         return str(float(value))
 
@@ -76,8 +76,9 @@ def load_incwave_config() -> tuple[str, str, str, bool]:
     has_overrides = False
 
     try:
-        pkg_share = get_package_share_directory('the_next_wave')
-        config_path = f'{pkg_share}/config/config.yaml'
+        if not config_path:
+            pkg_share = get_package_share_directory('the_next_wave')
+            config_path = f'{pkg_share}/config/config.yaml'
         with open(config_path, 'r', encoding='utf-8') as stream:
             cfg = yaml.safe_load(stream) or {}
 
@@ -98,6 +99,54 @@ def load_incwave_config() -> tuple[str, str, str, bool]:
         pass
 
     return inc_wave_dir, inc_wave_height_points, inc_wave_spectrum, has_overrides
+
+
+def resolve_mbari_wec_include(context):
+    """
+    Build the MBARI WEC include from the effective params file.
+
+    Incident-wave overrides are read here rather than at module load time.
+    This runs as an OpaqueFunction so that `params_file:=...` (resolved into
+    `effective_params_file`) also drives the simulator overrides, not just the
+    predictor node parameters.
+    """
+    params_path = LaunchConfiguration('effective_params_file').perform(context)
+
+    inc_wave_dir, inc_wave_height_points, inc_wave_spectrum, has_overrides = \
+        load_incwave_config(params_path)
+
+    launch_arguments = {
+        'extra_gz_args': LaunchConfiguration('gzsim_extra_gz_args').perform(context),
+    }
+    if has_overrides:
+        if inc_wave_dir != 'None':
+            launch_arguments['inc_wave_dir'] = inc_wave_dir
+        if inc_wave_height_points != 'None':
+            launch_arguments['inc_wave_height_points'] = inc_wave_height_points
+        if inc_wave_spectrum != 'None':
+            launch_arguments['inc_wave_spectrum'] = inc_wave_spectrum
+
+    mbari_wec_launch = PathJoinSubstitution(
+        [FindPackageShare('buoy_gazebo'), 'launch', 'mbari_wec.launch.py']
+    )
+
+    return [
+        LogInfo(
+            msg=(
+                'the_next_wave: incwave overrides from '
+                f'{params_path}: '
+                + ', '.join(f'{k}={v}' for k, v in launch_arguments.items()
+                            if k != 'extra_gz_args')
+                if has_overrides
+                else f'the_next_wave: no incwave overrides in {params_path}'
+            ),
+        ),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(mbari_wec_launch),
+            launch_arguments=launch_arguments.items(),
+            condition=IfCondition(LaunchConfiguration('mbari_wec_enable_effective')),
+        ),
+    ]
 
 
 def resolve_gz_extra_args(context):
@@ -148,12 +197,6 @@ def generate_launch_description() -> LaunchDescription:
     run_mode = LaunchConfiguration('run_mode')
     effective_params_file = LaunchConfiguration('effective_params_file')
     sbg_bridge_enable_effective = LaunchConfiguration('sbg_bridge_enable_effective')
-    mbari_wec_enable_effective = LaunchConfiguration('mbari_wec_enable_effective')
-    gzsim_extra_gz_args = LaunchConfiguration('gzsim_extra_gz_args')
-
-    regular_inc_wave_dir, regular_inc_wave_height_points, regular_inc_wave_spectrum, \
-        has_incwave_overrides = \
-        load_incwave_config()
 
     pkg_share = FindPackageShare('the_next_wave')
     regular_params_file = PathJoinSubstitution([pkg_share, 'config', 'config.yaml'])
@@ -163,36 +206,6 @@ def generate_launch_description() -> LaunchDescription:
     tcp_replay_params_file = PathJoinSubstitution(
         [pkg_share, 'config', 'config_sbg_tcp_replay.yaml']
     )
-
-    buoy_gazebo_pkg_share = FindPackageShare('buoy_gazebo')
-    mbari_wec_launch = PathJoinSubstitution(
-        [buoy_gazebo_pkg_share, 'launch', 'mbari_wec.launch.py']
-    )
-
-    if has_incwave_overrides:
-        mbari_wec_launch_arguments = {
-            'extra_gz_args': gzsim_extra_gz_args,
-        }
-        if regular_inc_wave_dir != 'None':
-            mbari_wec_launch_arguments['inc_wave_dir'] = regular_inc_wave_dir
-        if regular_inc_wave_height_points != 'None':
-            mbari_wec_launch_arguments['inc_wave_height_points'] = regular_inc_wave_height_points
-        if regular_inc_wave_spectrum != 'None':
-            mbari_wec_launch_arguments['inc_wave_spectrum'] = regular_inc_wave_spectrum
-
-        mbari_wec_include = IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(mbari_wec_launch),
-            launch_arguments=mbari_wec_launch_arguments.items(),
-            condition=IfCondition(mbari_wec_enable_effective),
-        )
-    else:
-        mbari_wec_include = IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(mbari_wec_launch),
-            launch_arguments={
-                'extra_gz_args': gzsim_extra_gz_args,
-            }.items(),
-            condition=IfCondition(mbari_wec_enable_effective),
-        )
 
     return LaunchDescription(
         [
@@ -489,6 +502,7 @@ def generate_launch_description() -> LaunchDescription:
                 condition=IfCondition(enable_sbg_tcp_replay),
             ),
             # Launch MBARI WEC simulator only when neither bridge nor TCP replay is enabled.
-            mbari_wec_include,
+            # Resolved late so `params_file:=...` also drives the simulator overrides.
+            OpaqueFunction(function=resolve_mbari_wec_include),
         ]
     )
