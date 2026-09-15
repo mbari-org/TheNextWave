@@ -584,6 +584,17 @@ class LSQWavePropParams:
             'description': 'Angular frequency for each (direction x frequency) = 1000 components.'
         },
     )
+    amps: npt.NDArray[np.float64] = field(
+        default_factory=empty_float64,
+        metadata={
+            'units': 'm',
+            'description': (
+                'Per-component amplitude scale from the measured spectrum, '
+                'sqrt(E * df * dtheta), one per kept component. The solver box '
+                'bounds are lb/ub = -/+ amps / 1.4142.'
+            )
+        },
+    )
     use_vel: bool = field(
         default=False,
         metadata={
@@ -633,6 +644,29 @@ class LSQWavePropParams:
     solver_status: int = field(
         default=0,
         metadata={'description': 'Optimizer status code.'},
+    )
+    solver_error: float = field(
+        default=float('nan'),
+        metadata={
+            'units': '-',
+            'description': (
+                'L-BFGS-B convergence metric: the projected-gradient infinity '
+                'norm at the solution, which is what `gtol` is tested against. '
+                'jaxopt reports it as state.error; the scipy path computes the '
+                'same quantity from res.jac. Smaller is more converged.'
+            )
+        },
+    )
+    solver_objective: float = field(
+        default=float('nan'),
+        metadata={
+            'units': 'm^2',
+            'description': (
+                'Objective at the solution, 0.5 * ||P1 @ A - b||^2, over the '
+                'stacked z/u/v measurement rows. Scale depends on window size, '
+                'so compare across windows of equal length.'
+            )
+        },
     )
 
 

@@ -316,9 +316,29 @@ class TheNextWave:
         t_end = float(np.nanmax(tin[input_slice, :]))
 
         # example.py uses 1 Hz predictions: tpred = t_end + arange(1, n_lead+1)
-        tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
-        xpred = np.full_like(tpred, x_target, dtype=float)
-        ypred = np.full_like(tpred, y_target, dtype=float)
+        t_lead = t_end + np.arange(1, n_lead + 1, dtype=float)
+
+        # Evaluate the solved model at the WEC target *and* at each buoy.
+        # The buoy forecasts cost one extra matvec (no extra solve) and can be
+        # verified against real measurements once those timestamps arrive,
+        # which is the only forecast-skill signal available without truth at
+        # the target. Buoys use their most recent known position, since they
+        # drift; location 0 is always the target.
+        try:
+            x_buoys = np.asarray(xin[input_slice, :], dtype=float)[-1, :]
+            y_buoys = np.asarray(yin[input_slice, :], dtype=float)[-1, :]
+        except Exception:
+            x_buoys = np.array([], dtype=float)
+            y_buoys = np.array([], dtype=float)
+
+        pred_loc_x = np.concatenate(([float(x_target)], x_buoys))
+        pred_loc_y = np.concatenate(([float(y_target)], y_buoys))
+        n_pred_loc = int(pred_loc_x.size)
+
+        # Location-major: [loc0 @ all leads, loc1 @ all leads, ...]
+        tpred = np.tile(t_lead, n_pred_loc)
+        xpred = np.repeat(pred_loc_x, n_lead)
+        ypred = np.repeat(pred_loc_y, n_lead)
 
         # `leastSquaresWavePropagation` no longer mutates the wavespec in-place, and
         # we cache spectrum->solution-space interpolation results on the object.
@@ -352,9 +372,25 @@ class TheNextWave:
         self.A0 = params.A
 
         prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
-        zout = prediction[:, 0]
-        uout = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(zout)
-        vout = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(zout)
+        z_all = prediction[:, 0]
+        u_all = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(z_all)
+        v_all = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(z_all)
+
+        # Split location-major results back out: row 0 is the target, rows 1..B
+        # are the buoys in the same column order as the measurement arrays.
+        z_by_loc = z_all.reshape((n_pred_loc, n_lead))
+        u_by_loc = u_all.reshape((n_pred_loc, n_lead))
+        v_by_loc = v_all.reshape((n_pred_loc, n_lead))
+
+        # Downstream consumers expect the target-only series under *_pred.
+        tpred = t_lead
+        zout = z_by_loc[0, :]
+        uout = u_by_loc[0, :]
+        vout = v_by_loc[0, :]
+
+        buoy_pred_z = z_by_loc[1:, :]
+        buoy_pred_u = u_by_loc[1:, :]
+        buoy_pred_v = v_by_loc[1:, :]
 
         # Dense model evaluation at the target (WEC).
         # When disabled, do not apply the solved model to any history/time series.
@@ -473,6 +509,14 @@ class TheNextWave:
                 'z_pred': zout,
                 'u_pred': uout,
                 'v_pred': vout,
+                # Forecasts at the buoy locations, shape (n_buoys, n_lead),
+                # sharing `t_pred`. Used for retrospective skill scoring once
+                # those timestamps are measured.
+                'buoy_pred_x': pred_loc_x[1:],
+                'buoy_pred_y': pred_loc_y[1:],
+                'buoy_pred_z': buoy_pred_z,
+                'buoy_pred_u': buoy_pred_u,
+                'buoy_pred_v': buoy_pred_v,
                 'dense_predictions_time': dense_predictions_time,
                 'dense_predictions_z': dense_predictions_z,
                 'dense_predictions_u': dense_predictions_u,

@@ -9,7 +9,9 @@ The core algorithmic pipeline is implemented in `the_next_wave.the_next_wave.The
 """
 
 from collections import deque, OrderedDict
+import csv
 from dataclasses import dataclass, field
+import os
 import threading
 import time
 import traceback
@@ -85,6 +87,20 @@ class TheNextWaveNodeParams:
     latent_scale_max: float = 1.25
 
     # Least-squares solver controls
+    # Retrospective forecast verification at the buoy locations.
+    # Each window forecasts at the buoys as well as the target; once those
+    # timestamps are actually measured, the residual gives a true
+    # forecast-skill number with no ground truth needed at the target.
+    forecast_skill_enable: bool = True
+    forecast_skill_lead_sec: float = 4.0
+    forecast_skill_window_sec: float = 140.0
+
+    # Optional dump of the raw solve (basis + solved amplitudes) to CSV.
+    # These are not published on any topic, so this is the only way to get at
+    # them for cross-implementation comparison.
+    solve_dump_enable: bool = False
+    solve_dump_dir: str = ''
+
     lsq_max_iter: int = 60
     lsq_solver_backend: str = 'auto'
     lsq_diagnostics_enable: bool = False
@@ -189,6 +205,16 @@ class TheNextWaveNode(Interface):
         self.swifts = SWIFTArray()
         # Initialize SBG objects with empty lists for 256s windowing.
         self.init_sbg_windows()
+
+        # Sequential window counter for the optional solve dump; also the join
+        # key tying solve_basis.csv / solve_amplitudes.csv to the bag CSVs.
+        self.solve_dump_window_id = 0
+
+        # Retrospective forecast verification: forecasts awaiting their target
+        # timestamp, and the rolling record of already-scored ones.
+        self.forecast_buffer = deque()
+        self.forecast_skill_hist = deque()
+        self.forecast_last_t = None
 
         self.last_process_time_us = None
         self.window_ready = False
@@ -513,9 +539,271 @@ class TheNextWaveNode(Interface):
         finally:
             self.processing = False
 
+    def dump_solve(self, results: dict) -> None:
+        """
+        Append this window's solver basis and amplitudes to CSV.
+
+        Both files carry `window_id` and the window's start/end times; the rest
+        of the per-window metadata (bulk wavespec, timings, forecast skill)
+        lives once in <case>_output.csv and joins on window_id. The timestamps
+        are kept here so the file states its own window span, and because this
+        counter is maintained by the node while the bag CSVs are numbered by
+        the exporter -- if the two ever disagree, the timestamps are
+        authoritative.
+
+        Writes two files under `solve_dump_dir`:
+
+        * ``solve_basis.csv`` -- one row per wave component per window.
+          `component_idx` is the component's position, matching index j of
+          A_cos_j / A_sin_j in solve_amplitudes.csv (the same amplitudes also
+          appear here as A_cos_m / A_sin_m). kx/ky/omega identify the component
+          completely; with the per-window x/y/time from the measurements they
+          regenerate the propagator:
+              phi = x*kx + y*ky - t*omega
+              P   = [[cos phi, sin phi],
+                     [vx*cos phi, vx*sin phi],
+                     [vy*cos phi, vy*sin phi]]   vx=(kx/|k|)*omega, vy=(ky/|k|)*omega
+        * ``solve_amplitudes.csv`` -- one row per window. The solved amplitudes
+          are in named columns A_cos_0..A_cos_{n_cols-1} followed by
+          A_sin_0..A_sin_{n_cols-1}; n_rows/n_cols give the (2, n_components)
+          shape they reshape to. Index j matches component_idx j in
+          solve_basis.csv, so the model at any point is:
+
+              eta = sum_j A_cos[j]*cos(phi_j) + A_sin[j]*sin(phi_j)
+        """
+        params = results.get('params')
+        if params is None:
+            return
+
+        try:
+            A = np.asarray(getattr(params, 'A', []), dtype=float).reshape((-1,))
+            kx = np.asarray(getattr(params, 'kx', []), dtype=float).reshape((-1,))
+            ky = np.asarray(getattr(params, 'ky', []), dtype=float).reshape((-1,))
+            om = np.asarray(getattr(params, 'omega', []), dtype=float).reshape((-1,))
+            amps = np.asarray(getattr(params, 'amps', []), dtype=float).reshape((-1,))
+        except Exception:
+            self.get_logger().warn('solve dump: could not read solver params; skipping window')
+            return
+
+        n_comp = int(kx.size)
+        if n_comp == 0 or A.size != 2 * n_comp:
+            self.get_logger().warn(
+                f'solve dump: unexpected shapes (n_comp={n_comp}, len(A)={A.size}); skipping'
+            )
+            return
+
+        t_start = float(results.get('window_start_time', float('nan')))
+        t_end = float(results.get('window_end_time', float('nan')))
+        wid = self.solve_dump_window_id
+        self.solve_dump_window_id += 1
+
+        try:
+            os.makedirs(self.params.solve_dump_dir, exist_ok=True)
+            basis_path = os.path.join(self.params.solve_dump_dir, 'solve_basis.csv')
+            amp_path = os.path.join(self.params.solve_dump_dir, 'solve_amplitudes.csv')
+
+            new_basis = not os.path.exists(basis_path)
+            with open(basis_path, 'a', newline='', encoding='utf-8') as fh:
+                w = csv.writer(fh)
+                if new_basis:
+                    w.writerow([
+                        'window_id', 'window_start_time', 'window_end_time', 'n_components',
+                        'component_idx',
+                        'kx_rad_per_m', 'ky_rad_per_m', 'omega_rad_per_s',
+                        'amp_m', 'bound_m', 'A_cos_m', 'A_sin_m',
+                    ])
+                for n in range(n_comp):
+                    amp = float(amps[n]) if n < amps.size else float('nan')
+                    w.writerow([
+                        wid, f'{t_start:.9f}', f'{t_end:.9f}', n_comp,
+                        n,
+                        f'{kx[n]:.12e}', f'{ky[n]:.12e}', f'{om[n]:.12e}',
+                        f'{amp:.12e}', f'{amp / 1.4142:.12e}',
+                        f'{A[n]:.12e}', f'{A[n + n_comp]:.12e}',
+                    ])
+
+            new_amp = not os.path.exists(amp_path)
+            with open(amp_path, 'a', newline='', encoding='utf-8') as fh:
+                w = csv.writer(fh)
+                if new_amp:
+                    w.writerow(
+                        ['window_id', 'window_start_time', 'window_end_time',
+                         'n_rows', 'n_cols', 'solver_error', 'solver_objective']
+                        + [f'A_cos_{i}' for i in range(n_comp)]
+                        + [f'A_sin_{i}' for i in range(n_comp)]
+                    )
+                w.writerow(
+                    [wid, f'{t_start:.9f}', f'{t_end:.9f}', 2, n_comp,
+                     f'{float(getattr(params, "solver_error", float("nan"))):.9e}',
+                     f'{float(getattr(params, "solver_objective", float("nan"))):.9e}']
+                    + [f'{v:.12e}' for v in A]
+                )
+        except Exception as exc:  # noqa: B902 - never let logging break the pipeline
+            self.get_logger().warn(f'solve dump failed for window {wid}: {exc}')
+
+    def update_forecast_skill(self, results: dict) -> tuple[float, int]:
+        """
+        Score past buoy forecasts against measurements and return rolling skill.
+
+        Each window buffers its forecast at `forecast_skill_lead_sec` ahead, for
+        every buoy. Once the window has slid far enough that those timestamps
+        are measured, the residual is accumulated into a rolling sum over
+        `forecast_skill_window_sec`:
+
+            skill = 1 - sum (z_meas - z_forecast)^2 / sum z_meas^2
+
+        1.0 is perfect, 0.0 is no better than predicting flat water, negative
+        is worse than flat water.
+
+        Returns (pooled_skill, skill_by_buoy, n_scored). The pooled value is
+        variance-weighted across buoys -- NOT the mean of skill_by_buoy -- so a
+        buoy sitting in higher wave energy counts for more. skill_by_buoy keeps
+        a single degraded SWIFT visible instead of averaging it away. Both are
+        NaN until something has been scored.
+        """
+        lead = float(self.params.forecast_skill_lead_sec)
+        hist_sec = float(self.params.forecast_skill_window_sec)
+
+        t_meas = np.asarray(results.get('t_meas', []), dtype=float)
+        z_meas = np.asarray(results.get('z_meas', []), dtype=float)
+        empty = np.array([], dtype=float)
+        if t_meas.size == 0 or z_meas.ndim != 2:
+            return float('nan'), empty, 0
+        t_col = t_meas[:, 0] if t_meas.ndim == 2 else t_meas.reshape((-1,))
+        if t_col.size < 2 or t_col.size != z_meas.shape[0]:
+            return float('nan'), empty, 0
+
+        t_lo, t_hi = float(t_col[0]), float(t_col[-1])
+
+        # Sim resets / time jumps invalidate everything buffered.
+        if self.forecast_last_t is not None and t_hi < self.forecast_last_t - 1e-3:
+            self.forecast_buffer.clear()
+            self.forecast_skill_hist.clear()
+        self.forecast_last_t = t_hi
+
+        # Score every buffered forecast whose target time is now measured.
+        still_pending = deque()
+        for entry in self.forecast_buffer:
+            t_tgt = entry['t']
+            if t_tgt > t_hi:
+                still_pending.append(entry)   # not yet observable
+                continue
+            if t_tgt < t_lo:
+                continue                      # window slid past it; drop
+            z_fc = entry['z']
+            n_b = min(z_fc.size, z_meas.shape[1])
+            # Keep the sums per buoy so a single bad SWIFT stays visible; the
+            # pooled number is recovered by summing across buoys.
+            ss_r = np.zeros(n_b, dtype=float)
+            ss_m = np.zeros(n_b, dtype=float)
+            for b in range(n_b):
+                z_obs = float(np.interp(t_tgt, t_col, z_meas[:, b]))
+                if not np.isfinite(z_obs) or not np.isfinite(z_fc[b]):
+                    continue
+                ss_r[b] = (z_obs - float(z_fc[b])) ** 2
+                ss_m[b] = z_obs ** 2
+            if ss_m.sum() > 0.0:
+                self.forecast_skill_hist.append((t_tgt, ss_r, ss_m))
+        self.forecast_buffer = still_pending
+
+        # Buffer this window's forecast at the configured lead.
+        bz = np.asarray(results.get('buoy_pred_z', []), dtype=float)
+        t_pred = np.asarray(results.get('t_pred', []), dtype=float).reshape((-1,))
+        if bz.ndim == 2 and bz.size and t_pred.size:
+            leads = t_pred - t_hi
+            i = int(np.argmin(np.abs(leads - lead)))
+            # Only accept a lead close to what was asked for; the horizon is
+            # derived per window and may not reach it.
+            if abs(float(leads[i]) - lead) <= 0.5 and i < bz.shape[1]:
+                self.forecast_buffer.append({'t': float(t_pred[i]), 'z': bz[:, i].copy()})
+
+        # Drop scored samples outside the rolling window.
+        while self.forecast_skill_hist and self.forecast_skill_hist[0][0] < t_hi - hist_sec:
+            self.forecast_skill_hist.popleft()
+
+        n_scored = len(self.forecast_skill_hist)
+        if n_scored == 0:
+            return float('nan'), np.array([], dtype=float), 0
+
+        n_b = max(int(e[1].size) for e in self.forecast_skill_hist)
+        r_tot = np.zeros(n_b, dtype=float)
+        m_tot = np.zeros(n_b, dtype=float)
+        for _t, rv, mv in self.forecast_skill_hist:
+            r_tot[:rv.size] += rv
+            m_tot[:mv.size] += mv
+
+        # Per buoy: NaN where that buoy contributed no measured variance.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            by_buoy = np.where(m_tot > 0.0, 1.0 - r_tot / m_tot, np.nan)
+
+        # Pooled: variance-weighted across buoys, so higher-energy buoys count
+        # for more. This is the headline number, not the mean of by_buoy.
+        m_sum = float(m_tot.sum())
+        pooled = (1.0 - float(r_tot.sum()) / m_sum) if m_sum > 0.0 else float('nan')
+        return pooled, by_buoy, n_scored
+
+    @staticmethod
+    def seconds_to_time_msg(t_s: float) -> TimeMsg:
+        """Absolute seconds -> builtin_interfaces/Time, clamped to non-negative."""
+        if not np.isfinite(t_s) or t_s < 0.0:
+            return TimeMsg(sec=0, nanosec=0)
+        sec = int(np.floor(t_s))
+        nsec = int(np.round((t_s - sec) * 1e9))
+        if nsec >= int(1e9):
+            sec += 1
+            nsec -= int(1e9)
+        if nsec < 0:
+            nsec = 0
+        return TimeMsg(sec=sec, nanosec=nsec)
+
+    def pack_buoy_predictions(self, msg, results: dict, t_pred: np.ndarray) -> None:
+        """
+        Attach the same-model forecasts evaluated at each buoy location.
+
+        Ordered location-major (buoy 0 at every lead, then buoy 1, ...) so it
+        matches the column order of the measurement arrays. These exist to be
+        scored against real measurements once their timestamps arrive.
+        """
+        if not hasattr(msg, 'buoy_predictions'):
+            return
+
+        bz = np.asarray(results.get('buoy_pred_z', []), dtype=float)
+        bu = np.asarray(results.get('buoy_pred_u', []), dtype=float)
+        bv = np.asarray(results.get('buoy_pred_v', []), dtype=float)
+        bx = np.asarray(results.get('buoy_pred_x', []), dtype=float).reshape((-1,))
+        by = np.asarray(results.get('buoy_pred_y', []), dtype=float).reshape((-1,))
+
+        if bz.ndim != 2 or bz.size == 0 or bx.size != bz.shape[0]:
+            msg.n_buoy_prediction_buoys = 0
+            msg.n_buoy_prediction_leads = 0
+            return
+
+        n_b, n_lead = bz.shape
+        n_lead = min(n_lead, int(t_pred.size))
+        msg.n_buoy_prediction_buoys = int(n_b)
+        msg.n_buoy_prediction_leads = int(n_lead)
+
+        for j in range(n_b):
+            for i in range(n_lead):
+                p = WavePredictionPoint()
+                t_s = float(t_pred[i])
+                p.header = Header(
+                    frame_id='wec_buoy', stamp=self.seconds_to_time_msg(t_s)
+                )
+                p.time = t_s
+                p.x = float(bx[j])
+                p.y = float(by[j])
+                p.elevation = float(bz[j, i])
+                p.vel_east = float(bu[j, i]) if bu.shape == bz.shape else 0.0
+                p.vel_north = float(bv[j, i]) if bv.shape == bz.shape else 0.0
+                msg.buoy_predictions.append(p)
+
     def publish_prediction(self, results: dict) -> None:
         wavespec = results.get('wavespec')
         params = results.get('params')
+
+        if self.params.solve_dump_enable and self.params.solve_dump_dir:
+            self.dump_solve(results)
 
         msg = WavePredictionOutput()
         # PlotJuggler (and most ROS tooling) aligns streams by `header.stamp`.
@@ -596,6 +884,19 @@ class TheNextWaveNode(Interface):
         msg.num_wavelengths = (
             int(getattr(params, 'kx', np.array([])).size) if params is not None else 0
         )
+
+        # L-BFGS-B fit metrics. Guarded with hasattr so an older message
+        # definition (without these fields) still publishes.
+        if hasattr(msg, 'solver_error'):
+            msg.solver_error = float(
+                getattr(params, 'solver_error', float('nan'))
+                if params is not None else float('nan')
+            )
+        if hasattr(msg, 'solver_objective'):
+            msg.solver_objective = float(
+                getattr(params, 'solver_objective', float('nan'))
+                if params is not None else float('nan')
+            )
 
         x_target = float(results.get('x_target', 0.0))
         y_target = float(results.get('y_target', 0.0))
@@ -728,6 +1029,25 @@ class TheNextWaveNode(Interface):
             pred_point.vel_east = float(u_pred[i]) if i < u_pred.size else 0.0
             pred_point.vel_north = float(v_pred[i]) if i < v_pred.size else 0.0
             msg.predictions.append(pred_point)
+
+        self.pack_buoy_predictions(msg, results, t_pred)
+
+        # Score matured forecasts, buffer this window's, publish rolling skill.
+        if self.params.forecast_skill_enable and hasattr(msg, 'forecast_skill'):
+            try:
+                skill, by_buoy, n_scored = self.update_forecast_skill(results)
+            except Exception as exc:  # noqa: B902 - never break publishing
+                self.get_logger().warn(f'forecast skill update failed: {exc}')
+                skill, by_buoy, n_scored = float('nan'), np.array([]), 0
+            msg.forecast_skill = float(skill)
+            msg.forecast_skill_lead_sec = float(self.params.forecast_skill_lead_sec)
+            msg.forecast_skill_n_scored = int(n_scored)
+            msg.forecast_skill_by_buoy = [float(v) for v in np.asarray(by_buoy).ravel()]
+        elif hasattr(msg, 'forecast_skill'):
+            msg.forecast_skill = float('nan')
+            msg.forecast_skill_lead_sec = float('nan')
+            msg.forecast_skill_n_scored = 0
+            msg.forecast_skill_by_buoy = []
 
         z_recon = np.asarray(results.get('z_recon', []), dtype=float)
         u_recon = np.asarray(results.get('u_recon', []), dtype=float)
@@ -1139,6 +1459,15 @@ class TheNextWaveNode(Interface):
         )
 
         # Least-squares solver controls
+        # Optional: retrospective forecast verification at the buoys.
+        self.declare_parameter('forecast_skill_enable', defaults.forecast_skill_enable)
+        self.declare_parameter('forecast_skill_lead_sec', defaults.forecast_skill_lead_sec)
+        self.declare_parameter('forecast_skill_window_sec', defaults.forecast_skill_window_sec)
+
+        # Optional: dump solver basis + amplitudes per window (not on any topic).
+        self.declare_parameter('solve_dump_enable', defaults.solve_dump_enable)
+        self.declare_parameter('solve_dump_dir', defaults.solve_dump_dir)
+
         self.declare_parameter('lsq_max_iter', defaults.lsq_max_iter)
         self.declare_parameter('lsq_solver_backend', defaults.lsq_solver_backend)
         self.declare_parameter('lsq_diagnostics_enable', defaults.lsq_diagnostics_enable)
@@ -1247,6 +1576,17 @@ class TheNextWaveNode(Interface):
         params.enable_dense_history_projection = bool(
             self.get_parameter('enable_dense_history_projection').value
         )
+
+        params.forecast_skill_enable = bool(self.get_parameter('forecast_skill_enable').value)
+        params.forecast_skill_lead_sec = float(
+            self.get_parameter('forecast_skill_lead_sec').value
+        )
+        params.forecast_skill_window_sec = float(
+            self.get_parameter('forecast_skill_window_sec').value
+        )
+
+        params.solve_dump_enable = bool(self.get_parameter('solve_dump_enable').value)
+        params.solve_dump_dir = str(self.get_parameter('solve_dump_dir').value or '')
 
         params.lsq_max_iter = int(self.get_parameter('lsq_max_iter').value)
         params.lsq_solver_backend = str(self.get_parameter('lsq_solver_backend').value)

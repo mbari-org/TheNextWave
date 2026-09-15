@@ -12,8 +12,17 @@ Produces two CSVs per bag:
   future sample at the target, with the per-window bulk wavespec parameters and
   solver diagnostics repeated on each row.
 
-Optional extra CSVs (``--dense``, ``--spectrum``) dump the dense in-window model
-projection and the per-window 1D energy spectrum.
+Optional extra CSVs:
+
+* ``--training`` -> ``<prefix>_training.csv``: the solver's own fit. Pairs the
+  measurements the solve actually consumed (downsampled/windowed z/u/v at each
+  buoy) with the reconstruction at those same points, so an independent
+  implementation can compare how well it reproduces the training data.
+* ``--dense`` -> ``<prefix>_dense.csv``: dense in-window model projection.
+* ``--spectrum`` -> ``<prefix>_spectrum.csv``: per-window 1D energy spectrum.
+
+``--stride N`` subsamples windows for those three (windows overlap heavily at
+0.5 s cadence); the prediction CSV always keeps every window.
 
 Usage::
 
@@ -142,7 +151,12 @@ def write_input_csv(bag_path: str, topic: str, out_path: str, labels: dict[int, 
 
 
 # Per-window fields repeated on every prediction row so the CSV stands alone.
+# `window_id` is a 0-based sequential index over /wave_predictions messages in
+# bag order. It matches the node's solve-dump window_id (both count published
+# windows from the start of the run), and ties every per-window CSV together.
+# `msg_stamp_s` is the authoritative key if the two ever disagree.
 WINDOW_COLUMNS = [
+    'window_id',
     'bag_time_s',
     'msg_stamp_s',
     'window_start_time',
@@ -153,6 +167,17 @@ WINDOW_COLUMNS = [
     'solve_time_s',
     'num_wavelengths',
     'centroid_period_s',
+    'solver_error',
+    'solver_objective',
+    'forecast_skill',
+    'forecast_skill_lead_sec',
+    'forecast_skill_n_scored',
+    # Per-buoy skill, fixed 4 columns to keep the header static (the node is
+    # built around SWIFT 22-25). NaN where a buoy did not contribute.
+    'forecast_skill_buoy0',
+    'forecast_skill_buoy1',
+    'forecast_skill_buoy2',
+    'forecast_skill_buoy3',
     'has_wavespec_bulk',
     'wavespec_hs_m',
     'wavespec_tp_s',
@@ -164,6 +189,9 @@ WINDOW_COLUMNS = [
 ]
 
 OUTPUT_COLUMNS = WINDOW_COLUMNS + [
+    'location',
+    'buoy_idx',
+    'lead_time_s',
     'pred_time_s',
     'pred_x_m',
     'pred_y_m',
@@ -173,8 +201,97 @@ OUTPUT_COLUMNS = WINDOW_COLUMNS + [
 ]
 
 
-def window_row(msg, t_ns) -> list:
+# Per-window metadata lives in exactly one place: <prefix>_output.csv. Every
+# other per-window export carries only `window_id` plus shape metadata it needs
+# to stand up on its own, and joins back to _output.csv on that id.
+TRAINING_KEY_COLUMNS = [
+    'window_id',
+    'n_samples',
+    'n_buoys',
+]
+
+# The solver's actual fit: what went in (z/u/v at each buoy, after downsampling
+# and windowing) beside what the solved model reproduces at those same points.
+# recon_* is P1 @ A evaluated at the measurement rows.
+TRAINING_COLUMNS = TRAINING_KEY_COLUMNS + [
+    'sample_idx',
+    'buoy_idx',
+    'time_s',
+    'x_m',
+    'y_m',
+    'z_meas_m',
+    'u_meas_mps',
+    'v_meas_mps',
+    'z_recon_m',
+    'u_recon_mps',
+    'v_recon_mps',
+]
+
+
+def training_key(msg, window_id: int) -> list:
     return [
+        window_id,
+        int(msg.measurements.n_samples),
+        int(msg.measurements.n_buoys),
+    ]
+
+
+def fmt(seq, idx: int, spec: str = '.6f') -> str:
+    """Format seq[idx], or '' when the array is absent/short for this window."""
+    if idx < len(seq):
+        return format(seq[idx], spec)
+    return ''
+
+
+def write_training_rows(writer, msg, window_id: int) -> int:
+    """
+    Emit one row per (sample, buoy) pairing measurement with reconstruction.
+
+    measurements.* and reconstruction.* are both (n_samples x n_buoys) flattened
+    in Fortran order, sharing measurements.time, so element (i, j) sits at
+    i + j * n_samples in every array.
+    """
+    meas = msg.measurements
+    recon = msg.reconstruction
+    n_s = int(meas.n_samples)
+    n_b = int(meas.n_buoys)
+    if n_s <= 0 or n_b <= 0 or not meas.z_meas:
+        return 0
+
+    key = training_key(msg, window_id)
+    rows = 0
+    for j in range(n_b):
+        for i in range(n_s):
+            flat = i + j * n_s
+            writer.writerow(key + [
+                i,
+                j,
+                fmt(meas.time, i, '.9f'),
+                fmt(meas.x_meas, flat),
+                fmt(meas.y_meas, flat),
+                fmt(meas.z_meas, flat),
+                fmt(meas.u_meas, flat),
+                fmt(meas.v_meas, flat),
+                fmt(recon.z_recon, flat),
+                fmt(recon.u_recon, flat),
+                fmt(recon.v_recon, flat),
+            ])
+            rows += 1
+    return rows
+
+
+def skill_by_buoy_cells(msg, n_cols: int = 4) -> list:
+    """Per-buoy forecast skill padded to a fixed column count ('' if absent)."""
+    values = list(getattr(msg, 'forecast_skill_by_buoy', []))
+    return [
+        f'{values[i]:.6f}' if i < len(values) else ''
+        for i in range(n_cols)
+    ]
+
+
+def window_row(msg, t_ns, window_id: int) -> list:
+    return [
+        window_id,
         f'{t_ns * 1e-9:.9f}',
         f'{stamp_to_sec(msg.header.stamp):.9f}',
         f'{msg.window_start_time:.9f}',
@@ -185,6 +302,13 @@ def window_row(msg, t_ns) -> list:
         f'{msg.solve_time:.6f}',
         int(msg.num_wavelengths),
         f'{msg.centroid_period:.6f}',
+        # Absent when reading a bag recorded before these fields were added.
+        f'{getattr(msg, "solver_error", float("nan")):.9e}',
+        f'{getattr(msg, "solver_objective", float("nan")):.9e}',
+        f'{getattr(msg, "forecast_skill", float("nan")):.6f}',
+        f'{getattr(msg, "forecast_skill_lead_sec", float("nan")):.3f}',
+        int(getattr(msg, 'forecast_skill_n_scored', 0)),
+        *skill_by_buoy_cells(msg),
         int(bool(msg.has_wavespec_bulk)),
         f'{msg.wavespec_hs:.6f}',
         f'{msg.wavespec_tp:.6f}',
@@ -202,42 +326,76 @@ def write_output_csvs(
     out_path: str,
     dense_path: str | None,
     spectrum_path: str | None,
-) -> tuple[int, int, int, int]:
-    n_msgs = n_pred = n_dense = n_spec = 0
+    training_path: str | None = None,
+    stride: int = 1,
+) -> dict[str, int]:
+    """
+    Write the prediction CSV plus any requested per-window extras.
+
+    `stride` subsamples windows for the heavy per-sample exports (training,
+    dense, spectrum) only; every window still appears in the prediction CSV.
+    """
+    n_msgs = n_pred = n_dense = n_spec = n_train = 0
+    stride = max(1, int(stride))
 
     dense_fh = open(dense_path, 'w', newline='', encoding='utf-8') if dense_path else None
     spec_fh = open(spectrum_path, 'w', newline='', encoding='utf-8') if spectrum_path else None
+    train_fh = open(training_path, 'w', newline='', encoding='utf-8') if training_path else None
     try:
         dense_writer = csv.writer(dense_fh) if dense_fh else None
         spec_writer = csv.writer(spec_fh) if spec_fh else None
+        train_writer = csv.writer(train_fh) if train_fh else None
+        if train_writer:
+            train_writer.writerow(TRAINING_COLUMNS)
         if dense_writer:
             dense_writer.writerow(
-                WINDOW_COLUMNS
-                + ['dense_time_s', 'dense_z_m', 'dense_u_east_mps', 'dense_v_north_mps']
+                ['window_id', 'dense_time_s', 'dense_z_m',
+                 'dense_u_east_mps', 'dense_v_north_mps']
             )
         if spec_writer:
             spec_writer.writerow(
-                WINDOW_COLUMNS + ['frequency_hz', 'energy_m2_per_hz']
+                ['window_id', 'frequency_hz', 'energy_m2_per_hz']
             )
 
         with open(out_path, 'w', newline='', encoding='utf-8') as fh:
             writer = csv.writer(fh)
             writer.writerow(OUTPUT_COLUMNS)
             for _topic, msg, t_ns in read_messages(bag_path, [topic]):
+                window_id = n_msgs
                 n_msgs += 1
-                base = window_row(msg, t_ns)
-                for point in msg.predictions:
-                    writer.writerow(base + [
+                sampled = (window_id % stride) == 0
+                base = window_row(msg, t_ns, window_id)
+                # Target forecasts, then the same model evaluated at each buoy.
+                # `location` distinguishes them; `buoy_idx` is -1 for the target.
+                w_end = float(msg.window_end_time)
+                n_lead = int(getattr(msg, 'n_buoy_prediction_leads', 0) or 0)
+
+                def pred_row(point, location, buoy_idx):
+                    return base + [
+                        location,
+                        buoy_idx,
+                        f'{point.time - w_end:.6f}',
                         f'{point.time:.9f}',
                         f'{point.x:.6f}',
                         f'{point.y:.6f}',
                         f'{point.elevation:.6f}',
                         f'{point.vel_east:.6f}',
                         f'{point.vel_north:.6f}',
-                    ])
+                    ]
+
+                for point in msg.predictions:
+                    writer.writerow(pred_row(point, 'target', -1))
                     n_pred += 1
 
-                if dense_writer and msg.has_dense_predictions:
+                for idx, point in enumerate(getattr(msg, 'buoy_predictions', [])):
+                    buoy_idx = (idx // n_lead) if n_lead > 0 else -1
+                    writer.writerow(pred_row(point, f'buoy{buoy_idx}', buoy_idx))
+                    n_pred += 1
+
+                if train_writer and sampled:
+                    n_train += write_training_rows(train_writer, msg, window_id)
+
+                if dense_writer and sampled and msg.has_dense_predictions:
                     for t_s, z, u, v in zip(
                         msg.dense_predictions_time,
                         msg.dense_predictions_z,
@@ -245,21 +403,31 @@ def write_output_csvs(
                         msg.dense_predictions_v,
                     ):
                         dense_writer.writerow(
-                            base + [f'{t_s:.9f}', f'{z:.6f}', f'{u:.6f}', f'{v:.6f}']
+                            [window_id, f'{t_s:.9f}', f'{z:.6f}', f'{u:.6f}', f'{v:.6f}']
                         )
                         n_dense += 1
 
-                if spec_writer:
+                if spec_writer and sampled:
                     for freq, energy in zip(msg.frequencies, msg.energy_by_freq):
-                        spec_writer.writerow(base + [f'{freq:.9f}', f'{energy:.9f}'])
+                        spec_writer.writerow(
+                            [window_id, f'{freq:.9f}', f'{energy:.9f}']
+                        )
                         n_spec += 1
     finally:
         if dense_fh:
             dense_fh.close()
         if spec_fh:
             spec_fh.close()
+        if train_fh:
+            train_fh.close()
 
-    return n_msgs, n_pred, n_dense, n_spec
+    return {
+        'messages': n_msgs,
+        'predictions': n_pred,
+        'dense': n_dense,
+        'spectrum': n_spec,
+        'training': n_train,
+    }
 
 
 def main() -> int:
@@ -276,7 +444,18 @@ def main() -> int:
                         help='also write <prefix>_dense.csv (in-window model projection)')
     parser.add_argument('--spectrum', action='store_true',
                         help='also write <prefix>_spectrum.csv (1D energy spectrum per window)')
+    parser.add_argument('--training', action='store_true',
+                        help='also write <prefix>_training.csv: the solver fit, pairing the '
+                             'measurements the solve actually used with the reconstruction '
+                             '(P1 @ A) at those same points')
+    parser.add_argument('--stride', type=int, default=1,
+                        help='keep every Nth window in the per-sample exports (training, '
+                             'dense, spectrum). Windows overlap heavily at 0.5 s cadence, so '
+                             'a stride of 20-60 usually loses nothing. Default 1 (all).')
     args = parser.parse_args()
+
+    if args.stride < 1:
+        parser.error('--stride must be >= 1')
 
     out_dir = os.path.dirname(os.path.abspath(args.prefix))
     if out_dir:
@@ -286,19 +465,29 @@ def main() -> int:
     output_csv = f'{args.prefix}_output.csv'
     dense_csv = f'{args.prefix}_dense.csv' if args.dense else None
     spectrum_csv = f'{args.prefix}_spectrum.csv' if args.spectrum else None
+    training_csv = f'{args.prefix}_training.csv' if args.training else None
 
     labels = load_point_labels(args.config)
     n_in = write_input_csv(args.bag, args.input_topic, input_csv, labels)
     print(f'{input_csv}: {n_in} rows from {args.input_topic}')
 
-    n_msgs, n_pred, n_dense, n_spec = write_output_csvs(
-        args.bag, args.output_topic, output_csv, dense_csv, spectrum_csv
+    counts = write_output_csvs(
+        args.bag, args.output_topic, output_csv, dense_csv, spectrum_csv,
+        training_path=training_csv, stride=args.stride,
     )
-    print(f'{output_csv}: {n_pred} rows from {n_msgs} {args.output_topic} messages')
+    n_msgs = counts['messages']
+    print(f'{output_csv}: {counts["predictions"]} rows '
+          f'from {n_msgs} {args.output_topic} messages')
+    if training_csv:
+        print(f'{training_csv}: {counts["training"]} rows (stride={args.stride})')
     if dense_csv:
-        print(f'{dense_csv}: {n_dense} rows')
+        print(f'{dense_csv}: {counts["dense"]} rows')
     if spectrum_csv:
-        print(f'{spectrum_csv}: {n_spec} rows')
+        print(f'{spectrum_csv}: {counts["spectrum"]} rows')
+
+    if training_csv and counts['training'] == 0 and n_msgs:
+        print('warning: no training rows -- measurements/reconstruction were empty',
+              file=sys.stderr)
 
     if n_in == 0 or n_msgs == 0:
         print('warning: one or both topics were empty in this bag', file=sys.stderr)

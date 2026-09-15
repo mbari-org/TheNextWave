@@ -257,6 +257,15 @@ def generate_launch_description() -> LaunchDescription:
                 ),
             ),
             DeclareLaunchArgument(
+                'solve_dump_dir',
+                default_value='',
+                description=(
+                    'Directory for the per-window solver dump (solve_basis.csv, '
+                    'solve_amplitudes.csv). Empty disables the dump. Requires '
+                    'solve_dump_enable:true in the params file.'
+                ),
+            ),
+            DeclareLaunchArgument(
                 'params_file',
                 default_value='',
                 description=(
@@ -432,6 +441,12 @@ def generate_launch_description() -> LaunchDescription:
                         'sbg_bridge_enable': ParameterValue(
                             sbg_bridge_enable_effective,
                             value_type=bool,
+                        ),
+                        # Where the node writes solve_basis.csv /
+                        # solve_amplitudes.csv. Empty disables the dump.
+                        'solve_dump_dir': ParameterValue(
+                            LaunchConfiguration('solve_dump_dir'),
+                            value_type=str,
                         ),
                     },
                 ],

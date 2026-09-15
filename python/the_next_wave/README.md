@@ -234,7 +234,6 @@ back, records a rosbag per case, and exports CSVs:
 ``` bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-export PYTHONPATH="$PYTHONPATH:$PWD/install/gz_sim_vendor/opt/gz_sim_vendor/lib/python:$PWD/install/gz_math_vendor/opt/gz_math_vendor/lib/python"
 
 src/TheNextWave/python/the_next_wave/scripts/run_sim_cases.sh -d 600 -x
 ```

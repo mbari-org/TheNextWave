@@ -147,13 +147,28 @@ def solve_box_lbfgsb(
     )
 
     x = res.x
+    r = P @ x - b
+    objective = 0.5 * float(r @ r)
     if print_losses:
-        r = P @ x - b
-        data_loss = 0.5 * float(r @ r)
-        print(
-            f'SciPy loss:  total={data_loss:.6e}  data={data_loss:.6e}',
-            flush=True,
-        )
+        # No regularization term, so the old `total=` and `data=` were always
+        # the same number; report the one value.
+        print(f'SciPy objective: {objective:.6e}', flush=True)
+
+    # Match the jax backend's reporting: `error` is the projected-gradient
+    # infinity norm, which is exactly what L-BFGS-B's `gtol` tests against.
+    # Components pinned at a bound whose gradient points further into that
+    # bound are already optimal and are excluded.
+    try:
+        g = np.asarray(res.jac, dtype=float).reshape(-1)
+        at_lb = x <= lb + 1e-14 * np.abs(lb).clip(1.0)
+        at_ub = x >= ub - 1e-14 * np.abs(ub).clip(1.0)
+        g_proj = g.copy()
+        g_proj[at_lb & (g > 0)] = 0.0
+        g_proj[at_ub & (g < 0)] = 0.0
+        res.error = float(np.max(np.abs(g_proj))) if g_proj.size else float('nan')
+    except Exception:
+        res.error = float('nan')
+    res.objective = objective
     return x, res
 
 
@@ -771,6 +786,8 @@ def leastSquaresWavePropagation(
     params.solver_success = bool(getattr(info, 'success', False))
     params.solver_nit = int(getattr(info, 'nit', 0) or 0)
     params.solver_status = int(getattr(info, 'status', 0) or 0)
+    params.solver_error = float(getattr(info, 'error', float('nan')))
+    params.solver_objective = float(getattr(info, 'objective', float('nan')))
     params.Etheta = np.zeros_like(Ei.flatten(order='F')).T
     params.Etheta[good_base] = (A[: (len(A) // 2)] ** 2.0 + A[(len(A) // 2):] ** 2.0) / 2.0
     params.Etheta = params.Etheta.reshape((len(k), len(theta)), order='F').T
@@ -802,6 +819,9 @@ def leastSquaresWavePropagation(
     params.kx = np.asarray(kx, dtype=float).reshape((-1,))
     params.ky = np.asarray(ky, dtype=float).reshape((-1,))
     params.omega = np.asarray(omega, dtype=float).reshape((-1,))
+    # `amps` is [amps_base, amps_base]; the first half is the per-component
+    # scale, so it lines up 1:1 with kx/ky/omega and with A's cosine half.
+    params.amps = np.asarray(amps[: len(amps) // 2], dtype=float).reshape((-1,))
     params.use_vel = use_vel
 
     t_stage = prof_mark('params_pack_s', t_stage)

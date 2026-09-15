@@ -8,29 +8,32 @@
 #   nospread/bag/            rosbag2 of /latent_data + /wave_predictions
 #   nospread_input.csv       simulator incident-wave truth at target + SWIFTs
 #   nospread_output.csv      predictor output (one row per predicted sample)
+#   nospread_training.csv    solver fit: measurements used vs reconstruction
 #   spread/bag/              "
 #   spread_input.csv         "
 #   spread_output.csv        "
+#   spread_training.csv      "
 #
 # Usage:
-#   scripts/run_sim_cases.sh [-d SIM_SECONDS] [-o OUT_DIR] [-c CASES] [-H] [-x]
+#   scripts/run_sim_cases.sh [-d SIM_SECONDS] [-o OUT_DIR] [-c CASES] [-s N] [-H] [-x]
 #
 #   -d  simulated seconds to record per case          (default: 600)
 #   -o  output directory                              (default: ./sim_runs/<timestamp>)
 #   -c  comma-separated cases to run                  (default: nospread,spread)
+#   -s  keep every Nth window in per-sample CSVs      (default: 1 = all)
 #   -H  run Gazebo with a GUI (default is headless)
 #   -x  also export dense + spectrum CSVs
 #
-# Environment: source /opt/ros/<distro>/setup.bash and the workspace
-# install/setup.bash. Do NOT overwrite PYTHONPATH afterwards -- the predictor
-# node resolves its console-script metadata from
-# install/the_next_wave/lib/python3.12/site-packages, and clobbering PYTHONPATH
-# makes the node die at startup while Gazebo keeps running (so you get a bag
-# with /latent_data but no /wave_predictions). Append to PYTHONPATH instead:
+# Environment:
 #
 #   source /opt/ros/jazzy/setup.bash
 #   source install/setup.bash
-#   export PYTHONPATH="$PYTHONPATH:$PWD/install/gz_sim_vendor/opt/gz_sim_vendor/lib/python:$PWD/install/gz_math_vendor/opt/gz_math_vendor/lib/python"
+#
+# Do NOT overwrite PYTHONPATH afterwards. The predictor node resolves its
+# console-script metadata from install/the_next_wave/lib/python3.12/
+# site-packages; clobbering PYTHONPATH makes the node die at startup while
+# Gazebo keeps running, so you get a bag with /latent_data and no
+# /wave_predictions. The preflight below catches this before a run starts.
 #
 set -uo pipefail
 
@@ -42,15 +45,17 @@ OUT_DIR=""
 CASES="nospread,spread"
 HEADLESS=true
 EXTRA_CSV=false
+CSV_STRIDE=1
 
-while getopts ':d:o:c:Hxh' opt; do
+while getopts ':d:o:c:s:Hxh' opt; do
   case "$opt" in
     d) DURATION_SEC="$OPTARG" ;;
     o) OUT_DIR="$OPTARG" ;;
     c) CASES="$OPTARG" ;;
+    s) CSV_STRIDE="$OPTARG" ;;
     H) HEADLESS=false ;;
     x) EXTRA_CSV=true ;;
-    h) sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'; exit 0 ;;
+    h) sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'; exit 0 ;;
     *) echo "unknown option -$OPTARG" >&2; exit 64 ;;
   esac
 done
@@ -195,10 +200,17 @@ run_case() {
   echo "  config : $config"
   grep -E '^\s*(wave_dir|Hs|Tp|n_phases|spreading_deg):' "$config" | sed 's/^/    /'
 
+  # The solve dump is written directly by the node (basis + amplitudes are on
+  # no topic, so they cannot come from the bag).
+  local solve_dir="${case_dir}/solve"
+  rm -rf "$solve_dir"
+  mkdir -p "$solve_dir"
+
   setsid ros2 launch the_next_wave the_next_wave.launch.py \
       params_file:="$config" \
       gzsim_headless:="$HEADLESS" \
       gzsim_verbose:=false \
+      solve_dump_dir:="$solve_dir" \
       > "${case_dir}/launch.log" 2>&1 &
   LAUNCH_PGID="$(pgid_of $!)"
   echo "  launch pgid=$LAUNCH_PGID -> ${case_dir}/launch.log"
@@ -245,7 +257,8 @@ run_case() {
   fi
 
   local export_args=(--prefix "${OUT_DIR}/${case_name}" --config "$config"
-                     --input-topic "$INPUT_TOPIC" --output-topic "$OUTPUT_TOPIC")
+                     --input-topic "$INPUT_TOPIC" --output-topic "$OUTPUT_TOPIC"
+                     --training --stride "$CSV_STRIDE")
   if [[ "$EXTRA_CSV" == true ]]; then
     export_args+=(--dense --spectrum)
   fi
