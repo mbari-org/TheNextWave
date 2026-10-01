@@ -39,6 +39,7 @@ class SbgBridgeService:
         *,
         bind: str,
         socket_timeout_sec: float,
+        swift_warm_start_us: int,
         port_by_swift: dict[int, int],
         logger,
         data_lock: threading.Lock,
@@ -46,6 +47,7 @@ class SbgBridgeService:
     ) -> None:
         self.bind = str(bind)
         self.socket_timeout_sec = float(socket_timeout_sec)
+        self.warm_start_us = swift_warm_start_us
         self.port_by_swift = dict(port_by_swift)
         self.logger = logger
         self.data_lock = data_lock
@@ -270,7 +272,7 @@ class SbgBridgeService:
                 )
 
                 if (
-                    rec['t_us'] - burst_start_t_us >= 45_000_000
+                    rec['t_us'] - burst_start_t_us >= self.warm_start_us  # 45_000_000
                     and all(k in rec for k in ('z', 'u', 'v', 'lat', 'lon', 't_utc'))
                 ):
                     self.ingest_swift_sample_locked(

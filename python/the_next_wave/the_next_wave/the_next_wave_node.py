@@ -62,6 +62,7 @@ class TheNextWaveNodeParams:
     sbg_bridge_enable: bool = False
     sbg_bridge_bind: str = '0.0.0.0'
     sbg_bridge_socket_timeout_sec: float = 1.0
+    sbg_bridge_swift_warm_start_us: int = 45_000_000
     sbg_use_example_frame: bool = False
     example_latorigin: float = 41.6878
     example_lonorigin: float = -9.0545
@@ -118,6 +119,7 @@ class TheNextWaveNodeParams:
                 f'  sbg_bridge_enable={self.sbg_bridge_enable},',
                 f"  sbg_bridge_bind='{self.sbg_bridge_bind}',",
                 f'  sbg_bridge_socket_timeout_sec={self.sbg_bridge_socket_timeout_sec},',
+                f'  sbg_bridge_swift_warm_start_us={self.sbg_bridge_swift_warm_start_us},',
                 f'  latent_noise_std_z_m={self.latent_noise_std_z_m},',
                 f'  latent_noise_std_uv_mps={self.latent_noise_std_uv_mps},',
                 f'  latent_noise_seed={self.latent_noise_seed},',
@@ -276,6 +278,7 @@ class TheNextWaveNode(Interface):
             self.sbg_bridge_service = SbgBridgeService(
                 bind=self.params.sbg_bridge_bind,
                 socket_timeout_sec=self.params.sbg_bridge_socket_timeout_sec,
+                swift_warm_start_us=self.params.sbg_bridge_swift_warm_start_us,
                 port_by_swift=self.params.sbg_bridge_port_by_swift,
                 logger=self.get_logger(),
                 data_lock=self.data_lock,
@@ -1163,6 +1166,10 @@ class TheNextWaveNode(Interface):
             'sbg_bridge_socket_timeout_sec',
             defaults.sbg_bridge_socket_timeout_sec,
         )
+        self.declare_parameter(
+            'sbg_bridge_swift_warm_start_us',
+            defaults.sbg_bridge_swift_warm_start_us,
+        )
 
         sbg_bridge_enable = bool(self.get_parameter('sbg_bridge_enable').value)
         self.declare_parameter('origin_at_target', (not sbg_bridge_enable))
@@ -1190,6 +1197,9 @@ class TheNextWaveNode(Interface):
         params.sbg_bridge_bind = str(self.get_parameter('sbg_bridge_bind').value)
         params.sbg_bridge_socket_timeout_sec = float(
             self.get_parameter('sbg_bridge_socket_timeout_sec').value
+        )
+        params.sbg_bridge_swift_warm_start_us = int(
+            self.get_parameter('sbg_bridge_swift_warm_start_us').value
         )
 
         params.latent_noise_std_z_m = float(self.get_parameter('latent_noise_std_z_m').value)
