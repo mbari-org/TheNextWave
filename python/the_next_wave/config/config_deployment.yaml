@@ -20,6 +20,19 @@
     dense_prediction_window: 50.0
     wec_actual_history_sec: 50.0
 
+    # Bulk diagnostic payloads, off in deployment: serializing them dominated
+    # the publish step (~33k floats per message, ~1.6 s). All are recoverable in
+    # post by replaying the raw SBG logs through the same ingest and solve:
+    #   measurements   -> raw SBG + window_start_time/window_end_time (still sent)
+    #   reconstruction -> P1 @ A from the replayed solve
+    #   buoy_predictions -> replay; forecast_skill scalars are still published live
+    #   wec_series     -> logged elsewhere
+    # Turn these back on for any run you intend to export to CSV.
+    publish_measurements: false
+    publish_reconstruction: false
+    publish_buoy_predictions: false
+    publish_wec_series: false
+
     # solve swifts feed the inversion; verification swift is held out entirely and used
     # only to score forecasts. It influences neither the solve nor the averaged
     # wavespec, so its genuinely leave-one-out

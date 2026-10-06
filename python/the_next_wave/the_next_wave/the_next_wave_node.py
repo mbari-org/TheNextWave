@@ -85,6 +85,16 @@ class TheNextWaveNodeParams:
     latent_scale_min: float = 0.75
     latent_scale_max: float = 1.25
 
+    # Optional bulk payloads on WavePredictionOutput. All four are diagnostic
+    # and all are recoverable in post by replaying the raw SBG logs through the
+    # same ingest and solve, so they can be switched off in deployment where
+    # serializing them dominates the publish cost (tens of thousands of floats
+    # per message). Default True so sim and data-export runs are unaffected.
+    publish_measurements: bool = True
+    publish_reconstruction: bool = True
+    publish_buoy_predictions: bool = True
+    publish_wec_series: bool = True
+
     # Which SWIFTs feed the inversion, and which (if any) is held out purely to
     # score forecasts against data the solve never saw.
     solve_swifts: list[str] = field(
@@ -806,6 +816,13 @@ class TheNextWaveNode(Interface):
         ][:n_b]
         msg.verification_buoy_index = int(results.get('verification_index', -1))
 
+        # The points themselves are only needed by external consumers; forecast
+        # skill is scored inside this node and published as scalars either way.
+        # Each point carries a Header with a string frame_id, so they are costly
+        # to serialize relative to their size.
+        if not self.params.publish_buoy_predictions:
+            return
+
         for j in range(n_b):
             for i in range(n_lead):
                 p = WavePredictionPoint()
@@ -923,18 +940,29 @@ class TheNextWaveNode(Interface):
         u_meas = np.asarray(results.get('u_meas', []), dtype=float)
         v_meas = np.asarray(results.get('v_meas', []), dtype=float)
 
-        if t_meas.ndim == 2 and t_meas.shape[1] > 0:
-            msg.measurements.time = t_meas[:, 0].flatten().tolist()
-        else:
-            msg.measurements.time = t_meas.flatten().tolist()
-
-        msg.measurements.x_meas = x_meas.flatten(order='F').tolist() if x_meas.size else []
-        msg.measurements.y_meas = y_meas.flatten(order='F').tolist() if y_meas.size else []
-        msg.measurements.z_meas = z_meas.flatten(order='F').tolist() if z_meas.size else []
-        msg.measurements.u_meas = u_meas.flatten(order='F').tolist() if u_meas.size else []
-        msg.measurements.v_meas = v_meas.flatten(order='F').tolist() if v_meas.size else []
+        # Shapes are always published: they are two ints, and they say what the
+        # arrays would have contained when the arrays themselves are suppressed.
         msg.measurements.n_samples = int(results.get('n_samples', 0))
         msg.measurements.n_buoys = int(results.get('n_buoys', 0))
+
+        if self.params.publish_measurements:
+            if t_meas.ndim == 2 and t_meas.shape[1] > 0:
+                msg.measurements.time = t_meas[:, 0].flatten().tolist()
+            else:
+                msg.measurements.time = t_meas.flatten().tolist()
+
+            msg.measurements.x_meas = x_meas.flatten(order='F').tolist() if x_meas.size else []
+            msg.measurements.y_meas = y_meas.flatten(order='F').tolist() if y_meas.size else []
+            msg.measurements.z_meas = z_meas.flatten(order='F').tolist() if z_meas.size else []
+            msg.measurements.u_meas = u_meas.flatten(order='F').tolist() if u_meas.size else []
+            msg.measurements.v_meas = v_meas.flatten(order='F').tolist() if v_meas.size else []
+        else:
+            msg.measurements.time = []
+            msg.measurements.x_meas = []
+            msg.measurements.y_meas = []
+            msg.measurements.z_meas = []
+            msg.measurements.u_meas = []
+            msg.measurements.v_meas = []
 
         # Actual-at-target sample/history captured from the same processing snapshot.
         wec = results.get('wec_actual')
@@ -952,7 +980,11 @@ class TheNextWaveNode(Interface):
             msg.wec_u = 0.0
             msg.wec_v = 0.0
 
-        if wec_series is not None and len(wec_series) > 0:
+        if (
+            self.params.publish_wec_series
+            and wec_series is not None
+            and len(wec_series) > 0
+        ):
             msg.has_wec_actual_series = True
             msg.wec_series_time = [float(p[0]) for p in wec_series]
             msg.wec_series_z = [float(p[1]) for p in wec_series]
@@ -1064,16 +1096,29 @@ class TheNextWaveNode(Interface):
         u_recon = np.asarray(results.get('u_recon', []), dtype=float)
         v_recon = np.asarray(results.get('v_recon', []), dtype=float)
 
-        if t_meas.ndim == 2 and t_meas.shape[1] > 0:
-            msg.reconstruction.time = t_meas[:, 0].flatten().tolist()
-        else:
-            msg.reconstruction.time = t_meas.flatten().tolist()
-
-        msg.reconstruction.z_recon = z_recon.flatten(order='F').tolist() if z_recon.size else []
-        msg.reconstruction.u_recon = u_recon.flatten(order='F').tolist() if u_recon.size else []
-        msg.reconstruction.v_recon = v_recon.flatten(order='F').tolist() if v_recon.size else []
         msg.reconstruction.n_samples = int(results.get('n_samples', 0))
         msg.reconstruction.n_buoys = int(results.get('n_buoys', 0))
+
+        if self.params.publish_reconstruction:
+            if t_meas.ndim == 2 and t_meas.shape[1] > 0:
+                msg.reconstruction.time = t_meas[:, 0].flatten().tolist()
+            else:
+                msg.reconstruction.time = t_meas.flatten().tolist()
+
+            msg.reconstruction.z_recon = (
+                z_recon.flatten(order='F').tolist() if z_recon.size else []
+            )
+            msg.reconstruction.u_recon = (
+                u_recon.flatten(order='F').tolist() if u_recon.size else []
+            )
+            msg.reconstruction.v_recon = (
+                v_recon.flatten(order='F').tolist() if v_recon.size else []
+            )
+        else:
+            msg.reconstruction.time = []
+            msg.reconstruction.z_recon = []
+            msg.reconstruction.u_recon = []
+            msg.reconstruction.v_recon = []
 
         self.pred_publisher.publish(msg)
 
@@ -1358,7 +1403,29 @@ class TheNextWaveNode(Interface):
         self.last_accept_t_us_by_swift.pop(swift_num, None)
 
     def maintain_sbg_window(self, sbg: SBGData, current_t_us: float, swift_num: int):
-        window_us = self.params.window_duration_sec * 1e6
+        # Buffer a little MORE than window_duration_sec.
+        #
+        # Readiness is the time intersection across buoys, and the buoys are not
+        # sample-synchronised -- their first and last samples differ by a few
+        # tenths of a second. If each buoy held exactly window_duration_sec, the
+        # intersection would always be slightly short and readiness would
+        # oscillate on the threshold. A margin of a few sample periods lets the
+        # intersection actually reach the target.
+        #
+        # Unlike the old "keep one sample however old it is" rule this is
+        # bounded, so a stale straggler after a time jump is still discarded.
+        # The extra samples cost nothing: the solve uses only the most recent
+        # n_te * Te seconds, well inside the window.
+        fs_window = (
+            self.params.downsample_to_hz
+            if self.params.downsample_to_hz > 0.0
+            else self.params.expected_fs
+        )
+        # Must exceed the worst inter-buoy skew (first- and last-sample spread
+        # combined), and stays far below window_duration_sec so it can never
+        # mask the kind of gap the forward-jump reset exists to catch.
+        margin_s = max(2.0, (10.0 / fs_window) if fs_window and fs_window > 0.0 else 2.0)
+        window_us = (self.params.window_duration_sec + margin_s) * 1e6
         cutoff_t_us = current_t_us - window_us
 
         # Deque-based rolling window: pop from the left until we're within cutoff.
@@ -1471,6 +1538,12 @@ class TheNextWaveNode(Interface):
         )
 
         # Least-squares solver controls
+        # Optional bulk message payloads (diagnostic; recoverable in post).
+        self.declare_parameter('publish_measurements', defaults.publish_measurements)
+        self.declare_parameter('publish_reconstruction', defaults.publish_reconstruction)
+        self.declare_parameter('publish_buoy_predictions', defaults.publish_buoy_predictions)
+        self.declare_parameter('publish_wec_series', defaults.publish_wec_series)
+
         # Buoy roles: which SWIFTs are inverted, which is held out for scoring.
         self.declare_parameter('solve_swifts', defaults.solve_swifts)
         self.declare_parameter('verification_swift', defaults.verification_swift)
@@ -1595,6 +1668,13 @@ class TheNextWaveNode(Interface):
         params.enable_dense_history_projection = bool(
             self.get_parameter('enable_dense_history_projection').value
         )
+
+        params.publish_measurements = bool(self.get_parameter('publish_measurements').value)
+        params.publish_reconstruction = bool(self.get_parameter('publish_reconstruction').value)
+        params.publish_buoy_predictions = bool(
+            self.get_parameter('publish_buoy_predictions').value
+        )
+        params.publish_wec_series = bool(self.get_parameter('publish_wec_series').value)
 
         params.solve_swifts = [
             str(s).strip()
