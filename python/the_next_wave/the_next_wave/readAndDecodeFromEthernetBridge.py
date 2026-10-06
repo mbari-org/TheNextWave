@@ -25,80 +25,52 @@ SYNC2 = b'\x5a'
 
 
 def iter_sbg_headers(
-    connection: socket.socket,
+    reader,
     *,
     stop_event=None,
-    idle_timeout_sec: float = 0.0,
 ) -> Iterator[Tuple[bytes, bytes]]:
     """
-    Yield (msg_id, msg_class) pairs from a raw SBG TCP byte stream.
+    Yield (msg_id, msg_class) pairs from a buffered SBG byte stream.
 
-    This matches the original byte-by-byte sync scan in the 2016 script.
-    The caller is expected to pass the returned header bytes into
-    `sbgMessageParse.parseSbgMessage(msg_class, msg_id, connection=connection, ...)`.
+    `reader` is a blocking binary file object -- `sock.makefile('rb')` for a
+    socket -- not a raw socket. Reading through a BufferedReader costs one
+    syscall per buffer fill rather than one per byte, which matters most during
+    a backfill burst and during sync-byte scans after a framing error.
 
-    `idle_timeout_sec` > 0 makes the iterator give up after that long without
-    receiving a single byte. A peer that disappears without a FIN/RST (power
-    cut, pulled cable, bridge reboot, NAT expiry) leaves recv timing out
-    forever, so without this the caller never regains control and the listening
-    socket never calls accept() again -- the SWIFT can then never reconnect.
+    Blocking is deliberate. A peer that vanishes without a FIN is detected by
+    TCP keepalive, which tears the socket down and makes `read` return b''
+    here; a read timeout cannot tell "silent between bursts" from "gone", and
+    firing mid-message can leave the BufferedReader's internal buffer in an
+    inconsistent state. Shutting the socket down from another thread also
+    unblocks these reads, which is how stop() interrupts us.
+
+    The caller passes the returned header bytes into
+    `sbgMessageParse.parseSbgMessage(msg_class, msg_id, connection=reader, ...)`.
     """
     # Non-empty value to start the while loop
     byte = b'\x00'
-    last_rx = time.monotonic()
-
-    def idle_expired() -> bool:
-        return (
-            idle_timeout_sec > 0.0
-            and (time.monotonic() - last_rx) > idle_timeout_sec
-        )
-
     while byte:
         if stop_event is not None and getattr(stop_event, 'is_set', lambda: False)():
             return
 
-        try:
-            # Receive one byte at a time
-            byte = connection.recv(1)
-        except socket.timeout:
-            if idle_expired():
-                return
-            continue
-
-        if byte:
-            last_rx = time.monotonic()
-
+        byte = reader.read(1)
         if not byte:
             return
 
         if byte != SYNC1:
             continue
 
-        try:
-            byte2 = connection.recv(1)
-        except socket.timeout:
-            if idle_expired():
-                return
-            continue
-
+        byte2 = reader.read(1)
         if not byte2:
             return
-        last_rx = time.monotonic()
 
         if byte2 != SYNC2:
             continue
 
-        try:
-            msg_id = connection.recv(1)
-            msg_class = connection.recv(1)
-        except socket.timeout:
-            if idle_expired():
-                return
-            continue
-
+        msg_id = reader.read(1)
+        msg_class = reader.read(1)
         if not msg_id or not msg_class:
             return
-        last_rx = time.monotonic()
 
         yield msg_id, msg_class
 

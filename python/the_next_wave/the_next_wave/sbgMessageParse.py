@@ -227,21 +227,20 @@ def parseSbgMessage(
         return dataStruct
 
 
-# Subroutine for reading sbg data from TCPIP socket.
+# Subroutine for reading sbg data from a buffered TCP stream.
+#
+# `connection` is a blocking binary file object (sock.makefile('rb')), not a
+# raw socket: BufferedReader.read(n) returns exactly n bytes unless the stream
+# ends, so the old accumulate-one-byte-at-a-time loops are unnecessary and each
+# field costs one buffered read instead of n syscalls.
 def readSbgData_TCPIP(msgID, connection):
     if msgID in sbgMessages:
-        msgLen = bytes()
-        while len(msgLen) < 2:
-            msgLen += connection.recv(1)
+        msgLen = connection.read(2)
         if msgLen != sbgMessages[msgID]['binLength']:
             raise ValueError('msgLen does not equal correct message length')
-        data = bytes()
-        while len(data) < sbgMessages[msgID]['intLength']:
-            data += connection.recv(1)
-        crc = bytes()
-        while len(crc) < 2:
-            crc += connection.recv(1)
-        etx = connection.recv(1)
+        data = connection.read(sbgMessages[msgID]['intLength'])
+        crc = connection.read(2)
+        etx = connection.read(1)
         return data, crc, etx
     return None, None, None
 

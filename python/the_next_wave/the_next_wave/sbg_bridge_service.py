@@ -44,24 +44,9 @@ class SbgBridgeService:
         logger,
         data_lock: threading.Lock,
         ingest_swift_sample_locked: Callable[..., None],
-        idle_timeout_sec: float = 1800.0,
     ) -> None:
         self.bind = str(bind)
         self.socket_timeout_sec = float(socket_timeout_sec)
-        # Last-resort backstop: drop a connection that has gone quiet this long
-        # and go back to accept(), so a half-open socket cannot wedge the port
-        # forever (recv on a vanished peer times out indefinitely rather than
-        # raising, and the serving thread never leaves connection_loop).
-        #
-        # MUST exceed the SWIFT inter-burst dead time. The buoys transmit in
-        # hourly bursts -- roughly 40 min of data then ~20 min of silence -- and
-        # that silence is normal, not a fault. A short value here would tear
-        # down a healthy connection every hour.
-        #
-        # Detecting a genuinely dead peer is keepalive's job, not this one:
-        # keepalive probes tell "alive but between bursts" apart from "gone",
-        # which a silence timer cannot do.
-        self.idle_timeout_sec = float(idle_timeout_sec)
         self.warm_start_us = swift_warm_start_us
         self.port_by_swift = dict(port_by_swift)
         self.logger = logger
@@ -69,6 +54,9 @@ class SbgBridgeService:
         self.ingest_swift_sample_locked = ingest_swift_sample_locked
 
         self.stop_event = threading.Event()
+        # Live connections, so stop() can shut them down to unblock the readers.
+        self.active_conn_by_swift: dict[int, socket.socket] = {}
+        self.active_conn_lock = threading.Lock()
         self.threads: list[threading.Thread] = []
         self.partial_by_swift: dict[int, dict] = {}
         self.last_status_t_us_by_swift: dict[int, int] = {}
@@ -95,6 +83,16 @@ class SbgBridgeService:
 
     def stop(self) -> None:
         self.stop_event.set()
+        # Reader threads block in read() with no timeout, so setting the event
+        # alone will not wake them. Shutting the socket down makes the pending
+        # read return b'' immediately and the loop exits.
+        with self.active_conn_lock:
+            conns = list(self.active_conn_by_swift.values())
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def roll_swift_data_loggers(self, swift_num: int) -> None:
         if self.swift_data_logger[swift_num] is None:
@@ -141,24 +139,35 @@ class SbgBridgeService:
                 except OSError:
                     break
 
+                reader = None
                 try:
                     self.logger.info(f'swift{swift_num} SBG bridge connection from {client_addr}')
-                    conn.settimeout(self.socket_timeout_sec)
+                    # Blocking: no read timeout. Keepalive detects a vanished
+                    # peer, and stop() shuts the socket down to unblock us.
+                    # A timeout here could fire mid-message and leave the
+                    # BufferedReader's buffer inconsistent -- likely in the
+                    # water, where links drop mid-message.
+                    conn.settimeout(None)
                     self.enable_keepalive(swift_num, conn)
-                    self.connection_loop(swift_num, conn)
+                    with self.active_conn_lock:
+                        self.active_conn_by_swift[swift_num] = conn
+                    reader = conn.makefile('rb')
+                    self.connection_loop(swift_num, reader)
                 except Exception:
                     self.logger.warn(f'swift{swift_num} SBG bridge connection ended')
                 else:
                     self.logger.warn(
-                        f'swift{swift_num} SBG bridge connection closed or went idle '
-                        f'(> {self.idle_timeout_sec:.0f}s without data); '
-                        'listening again'
+                        f'swift{swift_num} SBG bridge connection closed; listening again'
                     )
                 finally:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                    with self.active_conn_lock:
+                        self.active_conn_by_swift.pop(swift_num, None)
+                    for closeable in (reader, conn):
+                        try:
+                            if closeable is not None:
+                                closeable.close()
+                        except Exception:
+                            pass
 
         except Exception:
             self.logger.error(f'swift{swift_num} SBG bridge server failed on {bind}:{port}')
@@ -211,15 +220,11 @@ class SbgBridgeService:
             self.logger.warn(
                 f'swift{swift_num} keepalive tuning unavailable ({", ".join(missing)}); '
                 'falling back to system defaults, which can take hours to detect '
-                'a dead peer -- sbg_bridge_idle_timeout_sec is the only backstop'
+                'a dead peer, during which the reader stays blocked'
             )
 
-    def connection_loop(self, swift_num: int, conn: socket.socket) -> None:
-        for msg_id, msg_class in iter_sbg_headers(
-            conn,
-            stop_event=self.stop_event,
-            idle_timeout_sec=self.idle_timeout_sec,
-        ):
+    def connection_loop(self, swift_num: int, reader) -> None:
+        for msg_id, msg_class in iter_sbg_headers(reader, stop_event=self.stop_event):
             if not (rclpy.ok() and not self.stop_event.is_set()):
                 break
 
@@ -227,7 +232,7 @@ class SbgBridgeService:
                 data_struct = sbgMessageParse.parseSbgMessage(
                     msg_class,
                     msg_id,
-                    connection=conn,
+                    connection=reader,
                     printFlag=False,
                 )
             except Exception:

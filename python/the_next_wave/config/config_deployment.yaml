@@ -50,17 +50,13 @@
     sbg_bridge_bind: 0.0.0.0
     sbg_bridge_swift_warm_start_us: 45000000
 
-    # Backstop against a half-open connection wedging a port: recv on a peer
-    # that vanished without a FIN times out forever rather than raising, so the
-    # serving thread would never return to accept() and the SWIFT could never
-    # reconnect.
-    #
-    # Keep this ABOVE the inter-burst dead time. The SWIFTs transmit hourly --
-    # roughly 40 min of data, then ~20 min of silence -- and that silence is
-    # normal. A value below ~1200 s would drop a healthy connection every hour.
-    # Real dead-peer detection comes from TCP keepalive (~30 s), which can tell
-    # "alive but between bursts" from "gone"; this timer cannot.
-    sbg_bridge_idle_timeout_sec: 1800.0
+    # Note on SBG stream handling: reads are blocking and buffered, with no
+    # read timeout. A vanished peer is detected by TCP keepalive (~30 s), which
+    # is the only mechanism that tells "SWIFT alive but between hourly bursts"
+    # apart from "SWIFT gone" -- silence alone cannot, given the ~20 min
+    # inter-burst gap. A read timeout was rejected because it can fire
+    # mid-message and corrupt the buffered reader, which is likely in the water
+    # where links drop mid-message.
 
 /the_next_wave_plotter_node:
   ros__parameters:
