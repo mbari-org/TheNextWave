@@ -62,6 +62,11 @@ class TheNextWaveNodeParams:
     sbg_bridge_enable: bool = False
     sbg_bridge_bind: str = '0.0.0.0'
     sbg_bridge_socket_timeout_sec: float = 1.0
+    # Backstop for a wedged half-open connection. Must stay well above the
+    # SWIFT inter-burst dead time (~20 min between hourly bursts), or healthy
+    # connections get dropped every hour. Dead-peer detection is keepalive's
+    # job; this only catches the case where keepalive cannot run.
+    sbg_bridge_idle_timeout_sec: float = 1800.0
     sbg_bridge_swift_warm_start_us: int = 45_000_000
     sbg_use_example_frame: bool = False
     example_latorigin: float = 41.6878
@@ -134,6 +139,7 @@ class TheNextWaveNodeParams:
                 f'  sbg_bridge_enable={self.sbg_bridge_enable},',
                 f"  sbg_bridge_bind='{self.sbg_bridge_bind}',",
                 f'  sbg_bridge_socket_timeout_sec={self.sbg_bridge_socket_timeout_sec},',
+                f'  sbg_bridge_idle_timeout_sec={self.sbg_bridge_idle_timeout_sec},',
                 f'  sbg_bridge_swift_warm_start_us={self.sbg_bridge_swift_warm_start_us},',
                 f'  latent_noise_std_z_m={self.latent_noise_std_z_m},',
                 f'  latent_noise_std_uv_mps={self.latent_noise_std_uv_mps},',
@@ -315,6 +321,7 @@ class TheNextWaveNode(Interface):
             self.sbg_bridge_service = SbgBridgeService(
                 bind=self.params.sbg_bridge_bind,
                 socket_timeout_sec=self.params.sbg_bridge_socket_timeout_sec,
+                idle_timeout_sec=self.params.sbg_bridge_idle_timeout_sec,
                 swift_warm_start_us=self.params.sbg_bridge_swift_warm_start_us,
                 port_by_swift=self.params.sbg_bridge_port_by_swift,
                 logger=self.get_logger(),
@@ -1501,6 +1508,10 @@ class TheNextWaveNode(Interface):
         self.declare_parameter('sbg_bridge_enable', defaults.sbg_bridge_enable)
         self.declare_parameter('sbg_bridge_bind', defaults.sbg_bridge_bind)
         self.declare_parameter(
+            'sbg_bridge_idle_timeout_sec',
+            defaults.sbg_bridge_idle_timeout_sec,
+        )
+        self.declare_parameter(
             'sbg_bridge_socket_timeout_sec',
             defaults.sbg_bridge_socket_timeout_sec,
         )
@@ -1533,6 +1544,9 @@ class TheNextWaveNode(Interface):
 
         params.sbg_bridge_enable = sbg_bridge_enable
         params.sbg_bridge_bind = str(self.get_parameter('sbg_bridge_bind').value)
+        params.sbg_bridge_idle_timeout_sec = float(
+            self.get_parameter('sbg_bridge_idle_timeout_sec').value
+        )
         params.sbg_bridge_socket_timeout_sec = float(
             self.get_parameter('sbg_bridge_socket_timeout_sec').value
         )

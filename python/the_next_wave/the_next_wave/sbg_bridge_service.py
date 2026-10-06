@@ -44,9 +44,24 @@ class SbgBridgeService:
         logger,
         data_lock: threading.Lock,
         ingest_swift_sample_locked: Callable[..., None],
+        idle_timeout_sec: float = 1800.0,
     ) -> None:
         self.bind = str(bind)
         self.socket_timeout_sec = float(socket_timeout_sec)
+        # Last-resort backstop: drop a connection that has gone quiet this long
+        # and go back to accept(), so a half-open socket cannot wedge the port
+        # forever (recv on a vanished peer times out indefinitely rather than
+        # raising, and the serving thread never leaves connection_loop).
+        #
+        # MUST exceed the SWIFT inter-burst dead time. The buoys transmit in
+        # hourly bursts -- roughly 40 min of data then ~20 min of silence -- and
+        # that silence is normal, not a fault. A short value here would tear
+        # down a healthy connection every hour.
+        #
+        # Detecting a genuinely dead peer is keepalive's job, not this one:
+        # keepalive probes tell "alive but between bursts" apart from "gone",
+        # which a silence timer cannot do.
+        self.idle_timeout_sec = float(idle_timeout_sec)
         self.warm_start_us = swift_warm_start_us
         self.port_by_swift = dict(port_by_swift)
         self.logger = logger
@@ -110,7 +125,10 @@ class SbgBridgeService:
                     )
                     return
                 raise
-            server_sock.listen(1)
+            # Backlog > 1 so a SWIFT reconnecting while the previous connection
+            # is still being torn down gets queued rather than having its SYN
+            # dropped (which looks like a buoy that just never comes back).
+            server_sock.listen(8)
             server_sock.settimeout(self.socket_timeout_sec)
 
             self.logger.info(f'swift{swift_num} SBG bridge listening on {bind}:{port}')
@@ -126,9 +144,16 @@ class SbgBridgeService:
                 try:
                     self.logger.info(f'swift{swift_num} SBG bridge connection from {client_addr}')
                     conn.settimeout(self.socket_timeout_sec)
+                    self.enable_keepalive(conn)
                     self.connection_loop(swift_num, conn)
                 except Exception:
                     self.logger.warn(f'swift{swift_num} SBG bridge connection ended')
+                else:
+                    self.logger.warn(
+                        f'swift{swift_num} SBG bridge connection closed or went idle '
+                        f'(> {self.idle_timeout_sec:.0f}s without data); '
+                        'listening again'
+                    )
                 finally:
                     try:
                         conn.close()
@@ -144,8 +169,42 @@ class SbgBridgeService:
                 except Exception:
                     pass
 
+    def enable_keepalive(self, conn: socket.socket) -> None:
+        """
+        Turn on TCP keepalive so the kernel notices a peer that vanished.
+
+        Without this a half-open connection is indistinguishable from a quiet
+        one: recv times out forever and never errors. Keepalive probes make the
+        kernel tear the socket down, which surfaces as a real exception.
+        The per-connection tuning constants are Linux-only, so each is applied
+        independently and missing ones are ignored.
+        """
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            return
+
+        # Idle seconds before the first probe, probe interval, failed probes
+        # before the connection is declared dead: ~15 s + 3 x 5 s = ~30 s.
+        for opt_name, value in (
+            ('TCP_KEEPIDLE', 15),
+            ('TCP_KEEPINTVL', 5),
+            ('TCP_KEEPCNT', 3),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is None:
+                continue
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, opt, value)
+            except OSError:
+                pass
+
     def connection_loop(self, swift_num: int, conn: socket.socket) -> None:
-        for msg_id, msg_class in iter_sbg_headers(conn, stop_event=self.stop_event):
+        for msg_id, msg_class in iter_sbg_headers(
+            conn,
+            stop_event=self.stop_event,
+            idle_timeout_sec=self.idle_timeout_sec,
+        ):
             if not (rclpy.ok() and not self.stop_event.is_set()):
                 break
 

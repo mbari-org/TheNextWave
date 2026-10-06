@@ -16,7 +16,7 @@
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
     rotation_deg: 180.0
     downsample_to_hz: 5.0
-    wavespec_update_period_sec: 300.0
+    wavespec_update_period_sec: 3600.0
     dense_prediction_window: 50.0
     wec_actual_history_sec: 50.0
 
@@ -49,6 +49,18 @@
     sbg_bridge_use_example_frame: false
     sbg_bridge_bind: 0.0.0.0
     sbg_bridge_swift_warm_start_us: 45000000
+
+    # Backstop against a half-open connection wedging a port: recv on a peer
+    # that vanished without a FIN times out forever rather than raising, so the
+    # serving thread would never return to accept() and the SWIFT could never
+    # reconnect.
+    #
+    # Keep this ABOVE the inter-burst dead time. The SWIFTs transmit hourly --
+    # roughly 40 min of data, then ~20 min of silence -- and that silence is
+    # normal. A value below ~1200 s would drop a healthy connection every hour.
+    # Real dead-peer detection comes from TCP keepalive (~30 s), which can tell
+    # "alive but between bursts" from "gone"; this timer cannot.
+    sbg_bridge_idle_timeout_sec: 1800.0
 
 /the_next_wave_plotter_node:
   ros__parameters:

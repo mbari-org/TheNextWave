@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import socket
 import sys
+import time
 from typing import Iterator, Tuple
 
 try:
@@ -27,6 +28,7 @@ def iter_sbg_headers(
     connection: socket.socket,
     *,
     stop_event=None,
+    idle_timeout_sec: float = 0.0,
 ) -> Iterator[Tuple[bytes, bytes]]:
     """
     Yield (msg_id, msg_class) pairs from a raw SBG TCP byte stream.
@@ -34,9 +36,23 @@ def iter_sbg_headers(
     This matches the original byte-by-byte sync scan in the 2016 script.
     The caller is expected to pass the returned header bytes into
     `sbgMessageParse.parseSbgMessage(msg_class, msg_id, connection=connection, ...)`.
+
+    `idle_timeout_sec` > 0 makes the iterator give up after that long without
+    receiving a single byte. A peer that disappears without a FIN/RST (power
+    cut, pulled cable, bridge reboot, NAT expiry) leaves recv timing out
+    forever, so without this the caller never regains control and the listening
+    socket never calls accept() again -- the SWIFT can then never reconnect.
     """
     # Non-empty value to start the while loop
     byte = b'\x00'
+    last_rx = time.monotonic()
+
+    def idle_expired() -> bool:
+        return (
+            idle_timeout_sec > 0.0
+            and (time.monotonic() - last_rx) > idle_timeout_sec
+        )
+
     while byte:
         if stop_event is not None and getattr(stop_event, 'is_set', lambda: False)():
             return
@@ -45,7 +61,12 @@ def iter_sbg_headers(
             # Receive one byte at a time
             byte = connection.recv(1)
         except socket.timeout:
+            if idle_expired():
+                return
             continue
+
+        if byte:
+            last_rx = time.monotonic()
 
         if not byte:
             return
@@ -56,10 +77,13 @@ def iter_sbg_headers(
         try:
             byte2 = connection.recv(1)
         except socket.timeout:
+            if idle_expired():
+                return
             continue
 
         if not byte2:
             return
+        last_rx = time.monotonic()
 
         if byte2 != SYNC2:
             continue
@@ -68,10 +92,13 @@ def iter_sbg_headers(
             msg_id = connection.recv(1)
             msg_class = connection.recv(1)
         except socket.timeout:
+            if idle_expired():
+                return
             continue
 
         if not msg_id or not msg_class:
             return
+        last_rx = time.monotonic()
 
         yield msg_id, msg_class
 
