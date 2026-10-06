@@ -213,6 +213,10 @@ class TheNextWaveNode(Interface):
         self.forecast_skill_hist = deque()
         self.forecast_last_t = None
 
+        # Seconds of time covered by ALL gating buoys simultaneously; this, not
+        # any single buoy's span, is what the solve can actually use.
+        self.window_overlap_s = 0.0
+
         self.last_process_time_us = None
         self.window_ready = False
         self.window_ready_by_swift = {}
@@ -342,21 +346,36 @@ class TheNextWaveNode(Interface):
             setattr(self.swifts, f'sbg{sid}', sbg)
 
     def process_timer_callback(self):
-        t_last = (
-            self.swifts.sbg22.ShipMotion.time_stamp[-1]
-            if self.swifts.sbg22.ShipMotion.time_stamp
-            else float('nan')
-        )
-        t_first = (
-            self.swifts.sbg22.ShipMotion.time_stamp[0]
-            if self.swifts.sbg22.ShipMotion.time_stamp
-            else float('nan')
-        )
+        # Report the first solve buoy rather than a hardcoded swift22, which may
+        # not even be part of this run's solve set.
+        ref_name = self.params.solve_swifts[0] if self.params.solve_swifts else 'swift22'
+        ref_sbg = getattr(self.swifts, f'sbg{ref_name[-2:]}', None)
+        stamps = ref_sbg.ShipMotion.time_stamp if ref_sbg is not None else []
+
+        t_last = stamps[-1] if stamps else float('nan')
+        t_first = stamps[0] if stamps else float('nan')
         time_span_s = (t_last / 1e6) - (t_first / 1e6)
+
+        # Per-buoy state for every gating buoy, so a single lagging SWIFT is
+        # visible instead of hiding behind the aggregate flag. `end` is the
+        # newest sample time; buoys whose `end` values diverge have windows that
+        # no longer overlap, which fails alignment even when all report ready.
+        parts = []
+        for sid in sorted(self.window_ready_by_swift):
+            sbg = getattr(self.swifts, f'sbg{sid}', None)
+            ts = sbg.ShipMotion.time_stamp if sbg is not None else []
+            span = ((ts[-1] - ts[0]) / 1e6) if len(ts) >= 2 else 0.0
+            end = (ts[-1] / 1e6) if ts else float('nan')
+            flag = 'R' if self.window_ready_by_swift.get(sid, False) else '-'
+            parts.append(f'{sid}:{flag} n={len(ts)} t={span:.1f}s end={end:.1f}')
+
         self.get_logger().info(
             f'window ready? {self.window_ready}'
-            f' :: n={len(self.swifts.sbg22.ShipMotion.time_stamp)} samples'
+            f' :: overlap={self.window_overlap_s:.1f}s'
+            f'/{self.params.window_duration_sec:.0f}s'
+            f' :: {ref_name} n={len(stamps)} samples'
             f' :: t={time_span_s:.3f} s'
+            f' :: [{" | ".join(parts)}]'
         )
         with self.data_lock:
             if self.processing or not self.window_ready:
@@ -548,6 +567,49 @@ class TheNextWaveNode(Interface):
             self.get_logger().error(traceback.format_exc())
         finally:
             self.processing = False
+
+    def update_window_ready(self) -> None:
+        """
+        Set `window_ready` from the time INTERSECTION of the gating buoys.
+
+        Each buoy having a long enough span is not sufficient: a SWIFT that
+        stops delivering keeps a full window of stale samples and goes on
+        reporting ready while the live buoys advance past it. Once the ranges
+        stop overlapping, `load_raw_arrays_from_sbg` can no longer match
+        timestamps across buoys and every solve raises 'Not enough aligned
+        samples across buoys'.
+
+        The usable window is therefore [max(first), min(last)] over the gating
+        buoys, and that intersection is what has to cover window_duration_sec.
+        """
+        firsts: list[float] = []
+        lasts: list[float] = []
+        for sid in self.window_ready_by_swift:
+            sbg = getattr(self.swifts, f'sbg{sid}', None)
+            ts = sbg.ShipMotion.time_stamp if sbg is not None else []
+            if len(ts) < 2:
+                self.window_overlap_s = 0.0
+                self.window_ready = False
+                return
+            firsts.append(ts[0] / 1e6)
+            lasts.append(ts[-1] / 1e6)
+
+        if not firsts:
+            self.window_overlap_s = 0.0
+            self.window_ready = False
+            return
+
+        self.window_overlap_s = max(0.0, min(lasts) - max(firsts))
+
+        fs_ready = (
+            self.params.downsample_to_hz
+            if self.params.downsample_to_hz > 0.0
+            else self.params.expected_fs
+        )
+        epsilon_s = (1.0 / fs_ready) if fs_ready and fs_ready > 0.0 else 0.0
+        self.window_ready = self.window_overlap_s >= (
+            self.params.window_duration_sec - epsilon_s
+        )
 
     def validate_swift_roles(self, params: 'TheNextWaveNodeParams') -> None:
         """
@@ -1287,9 +1349,7 @@ class TheNextWaveNode(Interface):
         sbg.GpsPos.northing = deque()
 
         self.window_ready_by_swift[swift_num] = False
-        self.window_ready = bool(self.window_ready_by_swift) and all(
-            self.window_ready_by_swift.values()
-        )
+        self.update_window_ready()
 
         # Reset per-buoy latent amplitude state.
         self.latent_scale_state_by_swift.pop(swift_num, None)
@@ -1304,16 +1364,18 @@ class TheNextWaveNode(Interface):
         # Deque-based rolling window: pop from the left until we're within cutoff.
         # Assumes timestamps are monotonic; we reset the window on detected time jumps.
         try:
-            # IMPORTANT: Err slightly on the side of a *too-long* window.
+            # Pop strictly: every retained sample lies inside the window.
             #
-            # If we always pop until the oldest sample is >= cutoff, the resulting
-            # span will often be just under window_duration_sec by ~one sample period
-            # (e.g., 255.8s for 5 Hz) due to discrete sampling. Keeping a single
-            # sample just before the cutoff makes the span slightly >= 256s.
+            # This previously kept one sample just *before* the cutoff so the
+            # span would round up to >= window_duration_sec rather than falling
+            # a sample period short. That compensation is unnecessary -- the
+            # readiness checks already allow `ready_epsilon_s` (one sample
+            # period) of slack -- and it was actively harmful: after a time
+            # jump the retained straggler could sit an hour outside the window,
+            # making a 2-sample deque report a 3000 s span and pass readiness.
             while (
-                len(sbg.ShipMotion.time_stamp) >= 2
+                sbg.ShipMotion.time_stamp
                 and sbg.ShipMotion.time_stamp[0] < cutoff_t_us
-                and sbg.ShipMotion.time_stamp[1] < cutoff_t_us
             ):
                 sbg.ShipMotion.time_stamp.popleft()
                 sbg.ShipMotion.heave.popleft()
@@ -1366,9 +1428,7 @@ class TheNextWaveNode(Interface):
                 f'(threshold={self.params.window_duration_sec - ready_epsilon_s:.3f}) n={n} '
                 f'first={first:.3f} us last={last:.3f} us'
             )
-        self.window_ready = bool(self.window_ready_by_swift) and all(
-            self.window_ready_by_swift.values()
-        )
+        self.update_window_ready()
 
     def set_params(self):
         params = self.params
