@@ -144,7 +144,7 @@ class SbgBridgeService:
                 try:
                     self.logger.info(f'swift{swift_num} SBG bridge connection from {client_addr}')
                     conn.settimeout(self.socket_timeout_sec)
-                    self.enable_keepalive(conn)
+                    self.enable_keepalive(swift_num, conn)
                     self.connection_loop(swift_num, conn)
                 except Exception:
                     self.logger.warn(f'swift{swift_num} SBG bridge connection ended')
@@ -169,35 +169,50 @@ class SbgBridgeService:
                 except Exception:
                     pass
 
-    def enable_keepalive(self, conn: socket.socket) -> None:
+    def enable_keepalive(self, swift_num: int, conn: socket.socket) -> None:
         """
         Turn on TCP keepalive so the kernel notices a peer that vanished.
 
-        Without this a half-open connection is indistinguishable from a quiet
-        one: recv times out forever and never errors. Keepalive probes make the
-        kernel tear the socket down, which surfaces as a real exception.
-        The per-connection tuning constants are Linux-only, so each is applied
-        independently and missing ones are ignored.
+        This is the only mechanism that distinguishes "SWIFT alive but between
+        bursts" from "SWIFT gone": recv on a half-open socket times out forever
+        and never errors, so silence alone proves nothing. Keepalive probes make
+        the kernel tear the socket down, surfacing as a real exception.
+
+        Reports what actually applied. The tuning options are Linux-only, and
+        without them the system defaults apply -- typically 7200 s idle plus
+        9 x 75 s probes, i.e. over two hours before a dead peer is noticed.
+        That is far too slow to be useful here, so a partial application is
+        worth warning about rather than silently accepting.
         """
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except OSError:
+        except OSError as exc:
+            self.logger.warn(
+                f'swift{swift_num} could not enable SO_KEEPALIVE ({exc}); '
+                'a vanished peer will not be detected'
+            )
             return
 
         # Idle seconds before the first probe, probe interval, failed probes
-        # before the connection is declared dead: ~15 s + 3 x 5 s = ~30 s.
-        for opt_name, value in (
-            ('TCP_KEEPIDLE', 15),
-            ('TCP_KEEPINTVL', 5),
-            ('TCP_KEEPCNT', 3),
-        ):
+        # before the connection is declared dead: 15 + 3 x 5 = ~30 s.
+        wanted = (('TCP_KEEPIDLE', 15), ('TCP_KEEPINTVL', 5), ('TCP_KEEPCNT', 3))
+        missing = []
+        for opt_name, value in wanted:
             opt = getattr(socket, opt_name, None)
             if opt is None:
+                missing.append(opt_name)
                 continue
             try:
                 conn.setsockopt(socket.IPPROTO_TCP, opt, value)
             except OSError:
-                pass
+                missing.append(opt_name)
+
+        if missing:
+            self.logger.warn(
+                f'swift{swift_num} keepalive tuning unavailable ({", ".join(missing)}); '
+                'falling back to system defaults, which can take hours to detect '
+                'a dead peer -- sbg_bridge_idle_timeout_sec is the only backstop'
+            )
 
     def connection_loop(self, swift_num: int, conn: socket.socket) -> None:
         for msg_id, msg_class in iter_sbg_headers(
