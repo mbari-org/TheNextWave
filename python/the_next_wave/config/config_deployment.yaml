@@ -6,7 +6,7 @@
       swift22: 3003
       swift23: 3004
       swift24: 3001
-      swift25: 3002  # 3005  # 3002
+      swift25: 3002  # 3005 if spoofing
 
 /the_next_wave_node:
   ros__parameters:
@@ -19,6 +19,20 @@
     wavespec_update_period_sec: 300.0
     dense_prediction_window: 50.0
     wec_actual_history_sec: 50.0
+
+    # solve swifts feed the inversion; verification swift is held out entirely and used
+    # only to score forecasts. It influences neither the solve nor the averaged
+    # wavespec, so its genuinely leave-one-out
+    solve_swifts: ['swift22', 'swift23', 'swift24']
+    verification_swift: 'swift25'
+
+    # Score forecasts at every buoy once their timestamps are measured.
+    # forecast_skill pools all of them; forecast_skill_by_buoy keeps them
+    # separate, and verification_buoy_index points at swift25 -- the only
+    # entry whose residual is out of sample.
+    forecast_skill_enable: true
+    forecast_skill_lead_sec: 4.0
+    forecast_skill_window_sec: 140.0
 
     # Least-squares solver tuning
     lsq_max_iter: 60

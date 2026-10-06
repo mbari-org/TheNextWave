@@ -634,6 +634,29 @@ class LSQWavePropParams:
         default=0,
         metadata={'description': 'Optimizer status code.'},
     )
+    solver_error: float = field(
+        default=float('nan'),
+        metadata={
+            'units': '-',
+            'description': (
+                'L-BFGS-B convergence metric: the projected-gradient infinity '
+                'norm at the solution, which is what `gtol` is tested against. '
+                'jaxopt reports it as state.error; the scipy path computes the '
+                'same quantity from res.jac. Smaller is more converged.'
+            )
+        },
+    )
+    solver_objective: float = field(
+        default=float('nan'),
+        metadata={
+            'units': 'm^2',
+            'description': (
+                'Objective at the solution, 0.5 * ||P1 @ A - b||^2, over the '
+                'stacked z/u/v measurement rows. Scale depends on window size, '
+                'so compare across windows of equal length.'
+            )
+        },
+    )
 
 
 @dataclass

@@ -85,6 +85,21 @@ class TheNextWaveNodeParams:
     latent_scale_min: float = 0.75
     latent_scale_max: float = 1.25
 
+    # Which SWIFTs feed the inversion, and which (if any) is held out purely to
+    # score forecasts against data the solve never saw.
+    solve_swifts: list[str] = field(
+        default_factory=lambda: ['swift22', 'swift23', 'swift24', 'swift25']
+    )
+    verification_swift: str = ''
+
+    # Retrospective forecast verification at the buoy locations.
+    # Each window forecasts at the buoys as well as the target; once those
+    # timestamps are actually measured, the residual gives a true
+    # forecast-skill number with no ground truth needed at the target.
+    forecast_skill_enable: bool = True
+    forecast_skill_lead_sec: float = 4.0
+    forecast_skill_window_sec: float = 140.0
+
     # Least-squares solver controls
     lsq_max_iter: int = 60
     lsq_solver_backend: str = 'auto'
@@ -192,6 +207,12 @@ class TheNextWaveNode(Interface):
         # Initialize SBG objects with empty lists for 256s windowing.
         self.init_sbg_windows()
 
+        # Retrospective forecast verification: forecasts awaiting their target
+        # timestamp, and the rolling record of already-scored ones.
+        self.forecast_buffer = deque()
+        self.forecast_skill_hist = deque()
+        self.forecast_last_t = None
+
         self.last_process_time_us = None
         self.window_ready = False
         self.window_ready_by_swift = {}
@@ -218,6 +239,9 @@ class TheNextWaveNode(Interface):
         self.predictor = TheNextWave(
             config=TheNextWaveConfig(
                 expected_fs=self.params.expected_fs,
+                solve_swifts=tuple(self.params.solve_swifts),
+                verification_swift=self.params.verification_swift,
+                forecast_skill_enable=self.params.forecast_skill_enable,
                 rotation_deg=self.params.rotation_deg,
                 origin_at_target=self.params.origin_at_target,
                 flip_z_sign=self.params.flip_z_sign,
@@ -261,13 +285,22 @@ class TheNextWaveNode(Interface):
                 f'target_xy=({self.params.example_xtarget:.1f},{self.params.example_ytarget:.1f})'
             )
 
-        # Track window readiness only for configured buoys
-        configured_swift_nums = [int(name[-2:]) for name in self.params.swift_idx.keys()]
-        if configured_swift_nums:
-            self.window_ready_by_swift = {sid: False for sid in configured_swift_nums}
+        # Gate processing on the buoys actually in use -- the solve set plus any
+        # verification buoy. Waiting on buoys that are not part of the run would
+        # stall the window forever (every swifts.* parameter is declared with a
+        # default, so swift_idx always lists all four).
+        required = list(self.params.solve_swifts)
+        if self.params.verification_swift:
+            required.append(self.params.verification_swift)
+        required_nums = [int(name[-2:]) for name in required]
+        if required_nums:
+            self.window_ready_by_swift = {sid: False for sid in required_nums}
         else:
             # Safe default if no params set (won't trigger unless data arrives)
             self.window_ready_by_swift = {sid: False for sid in range(22, 26)}
+        self.get_logger().info(
+            f'Gating window readiness on SWIFTs {sorted(required_nums)}'
+        )
 
         self.pred_publisher = self.create_publisher(WavePredictionOutput, 'wave_predictions', 10)
 
@@ -516,6 +549,216 @@ class TheNextWaveNode(Interface):
         finally:
             self.processing = False
 
+    def validate_swift_roles(self, params: 'TheNextWaveNodeParams') -> None:
+        """
+        Check solve_swifts / verification_swift and raise on a bad combination.
+
+        A misconfigured buoy set silently changes what the solve sees, so this
+        fails at startup rather than producing quietly wrong predictions.
+        """
+        known = {f'swift{n}' for n in range(22, 26)}
+
+        unknown = [s for s in params.solve_swifts if s not in known]
+        if unknown:
+            raise ValueError(
+                f'solve_swifts contains unknown entries {unknown}; '
+                f'valid names are {sorted(known)}'
+            )
+
+        if len(set(params.solve_swifts)) != len(params.solve_swifts):
+            raise ValueError(f'solve_swifts has duplicates: {params.solve_swifts}')
+
+        if len(params.solve_swifts) < 3:
+            raise ValueError(
+                f'solve_swifts needs at least 3 buoys, got {len(params.solve_swifts)}: '
+                f'{params.solve_swifts}'
+            )
+
+        verif = params.verification_swift
+        if verif:
+            if verif not in known:
+                raise ValueError(
+                    f'verification_swift={verif!r} is not a known SWIFT; '
+                    f'valid names are {sorted(known)}'
+                )
+            if verif in params.solve_swifts:
+                raise ValueError(
+                    f'verification_swift={verif!r} is also in solve_swifts; it must be '
+                    'held out of the inversion to give an out-of-sample residual'
+                )
+
+        self.get_logger().info(
+            f'SWIFT roles: solve={params.solve_swifts} '
+            f"verification={verif or '(none)'}"
+        )
+
+    def update_forecast_skill(self, results: dict) -> tuple[float, np.ndarray, int]:
+        """
+        Score past buoy forecasts against measurements and return rolling skill.
+
+        Each window buffers its forecast at `forecast_skill_lead_sec` ahead, for
+        every buoy. Once the window has slid far enough that those timestamps
+        are measured, the residual is accumulated into a rolling sum over
+        `forecast_skill_window_sec`:
+
+            skill = 1 - sum (z_meas - z_forecast)^2 / sum z_meas^2
+
+        1.0 is perfect, 0.0 is no better than predicting flat water, negative
+        is worse than flat water.
+
+        Returns (pooled_skill, skill_by_buoy, n_scored). The pooled value is
+        variance-weighted across buoys -- NOT the mean of skill_by_buoy -- so a
+        buoy sitting in higher wave energy counts for more. skill_by_buoy keeps
+        a single degraded SWIFT visible instead of averaging it away. Both are
+        NaN until something has been scored.
+        """
+        lead = float(self.params.forecast_skill_lead_sec)
+        hist_sec = float(self.params.forecast_skill_window_sec)
+
+        # Score every buoy that has a forecast: the solve buoys, plus the
+        # verification buoy when one is held out. `skill_z_meas` covers the same
+        # set and column order as `buoy_pred_z`. Only the verification buoy's
+        # residual is out of sample -- read it from forecast_skill_by_buoy at
+        # verification_buoy_index; the pooled value mixes both.
+        t_meas = np.asarray(results.get('skill_t_meas', []), dtype=float)
+        z_meas = np.asarray(results.get('skill_z_meas', []), dtype=float)
+        empty = np.array([], dtype=float)
+        if t_meas.size == 0 or z_meas.ndim != 2:
+            return float('nan'), empty, 0
+        t_col = t_meas[:, 0] if t_meas.ndim == 2 else t_meas.reshape((-1,))
+        if t_col.size < 2 or t_col.size != z_meas.shape[0]:
+            return float('nan'), empty, 0
+
+        t_lo, t_hi = float(t_col[0]), float(t_col[-1])
+
+        # Sim resets / time jumps invalidate everything buffered.
+        if self.forecast_last_t is not None and t_hi < self.forecast_last_t - 1e-3:
+            self.forecast_buffer.clear()
+            self.forecast_skill_hist.clear()
+        self.forecast_last_t = t_hi
+
+        # Score every buffered forecast whose target time is now measured.
+        still_pending = deque()
+        for entry in self.forecast_buffer:
+            t_tgt = entry['t']
+            if t_tgt > t_hi:
+                still_pending.append(entry)   # not yet observable
+                continue
+            if t_tgt < t_lo:
+                continue                      # window slid past it; drop
+            z_fc = entry['z']
+            n_b = min(z_fc.size, z_meas.shape[1])
+            # Keep the sums per buoy so a single bad SWIFT stays visible; the
+            # pooled number is recovered by summing across buoys.
+            ss_r = np.zeros(n_b, dtype=float)
+            ss_m = np.zeros(n_b, dtype=float)
+            for b in range(n_b):
+                z_obs = float(np.interp(t_tgt, t_col, z_meas[:, b]))
+                if not np.isfinite(z_obs) or not np.isfinite(z_fc[b]):
+                    continue
+                ss_r[b] = (z_obs - float(z_fc[b])) ** 2
+                ss_m[b] = z_obs ** 2
+            if ss_m.sum() > 0.0:
+                self.forecast_skill_hist.append((t_tgt, ss_r, ss_m))
+        self.forecast_buffer = still_pending
+
+        # Buffer this window's forecast at the configured lead.
+        bz = np.asarray(results.get('buoy_pred_z', []), dtype=float)
+        t_pred = np.asarray(results.get('t_pred', []), dtype=float).reshape((-1,))
+        if bz.ndim == 2 and bz.size and t_pred.size:
+            leads = t_pred - t_hi
+            i = int(np.argmin(np.abs(leads - lead)))
+            # Only accept a lead close to what was asked for; the horizon is
+            # derived per window and may not reach it.
+            if abs(float(leads[i]) - lead) <= 0.5 and i < bz.shape[1]:
+                self.forecast_buffer.append({'t': float(t_pred[i]), 'z': bz[:, i].copy()})
+
+        # Drop scored samples outside the rolling window.
+        while self.forecast_skill_hist and self.forecast_skill_hist[0][0] < t_hi - hist_sec:
+            self.forecast_skill_hist.popleft()
+
+        n_scored = len(self.forecast_skill_hist)
+        if n_scored == 0:
+            return float('nan'), np.array([], dtype=float), 0
+
+        n_b = max(int(e[1].size) for e in self.forecast_skill_hist)
+        r_tot = np.zeros(n_b, dtype=float)
+        m_tot = np.zeros(n_b, dtype=float)
+        for _t, rv, mv in self.forecast_skill_hist:
+            r_tot[:rv.size] += rv
+            m_tot[:mv.size] += mv
+
+        # Per buoy: NaN where that buoy contributed no measured variance.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            by_buoy = np.where(m_tot > 0.0, 1.0 - r_tot / m_tot, np.nan)
+
+        # Pooled: variance-weighted across buoys, so higher-energy buoys count
+        # for more. This is the headline number, not the mean of by_buoy.
+        m_sum = float(m_tot.sum())
+        pooled = (1.0 - float(r_tot.sum()) / m_sum) if m_sum > 0.0 else float('nan')
+        return pooled, by_buoy, n_scored
+
+    @staticmethod
+    def seconds_to_time_msg(t_s: float) -> TimeMsg:
+        """Absolute seconds -> builtin_interfaces/Time, clamped to non-negative."""
+        if not np.isfinite(t_s) or t_s < 0.0:
+            return TimeMsg(sec=0, nanosec=0)
+        sec = int(np.floor(t_s))
+        nsec = int(np.round((t_s - sec) * 1e9))
+        if nsec >= int(1e9):
+            sec += 1
+            nsec -= int(1e9)
+        if nsec < 0:
+            nsec = 0
+        return TimeMsg(sec=sec, nanosec=nsec)
+
+    def pack_buoy_predictions(self, msg, results: dict, t_pred: np.ndarray) -> None:
+        """
+        Attach the same-model forecasts evaluated at each buoy location.
+
+        Ordered location-major (buoy 0 at every lead, then buoy 1, ...) so it
+        matches the column order of the measurement arrays. These exist to be
+        scored against real measurements once their timestamps arrive.
+        """
+        bz = np.asarray(results.get('buoy_pred_z', []), dtype=float)
+        bu = np.asarray(results.get('buoy_pred_u', []), dtype=float)
+        bv = np.asarray(results.get('buoy_pred_v', []), dtype=float)
+        bx = np.asarray(results.get('buoy_pred_x', []), dtype=float).reshape((-1,))
+        by = np.asarray(results.get('buoy_pred_y', []), dtype=float).reshape((-1,))
+
+        msg.solve_swifts = [str(s) for s in results.get('solve_swifts', [])]
+
+        if bz.ndim != 2 or bz.size == 0 or bx.size != bz.shape[0]:
+            msg.n_buoy_prediction_buoys = 0
+            msg.n_buoy_prediction_leads = 0
+            msg.buoy_prediction_labels = []
+            msg.verification_buoy_index = -1
+            return
+
+        n_b, n_lead = bz.shape
+        n_lead = min(n_lead, int(t_pred.size))
+        msg.n_buoy_prediction_buoys = int(n_b)
+        msg.n_buoy_prediction_leads = int(n_lead)
+        msg.buoy_prediction_labels = [
+            str(s) for s in results.get('buoy_pred_labels', [])
+        ][:n_b]
+        msg.verification_buoy_index = int(results.get('verification_index', -1))
+
+        for j in range(n_b):
+            for i in range(n_lead):
+                p = WavePredictionPoint()
+                t_s = float(t_pred[i])
+                p.header = Header(
+                    frame_id='wec_buoy', stamp=self.seconds_to_time_msg(t_s)
+                )
+                p.time = t_s
+                p.x = float(bx[j])
+                p.y = float(by[j])
+                p.elevation = float(bz[j, i])
+                p.vel_east = float(bu[j, i]) if bu.shape == bz.shape else 0.0
+                p.vel_north = float(bv[j, i]) if bv.shape == bz.shape else 0.0
+                msg.buoy_predictions.append(p)
+
     def publish_prediction(self, results: dict) -> None:
         wavespec = results.get('wavespec')
         params = results.get('params')
@@ -547,16 +790,15 @@ class TheNextWaveNode(Interface):
         msg.window_end_time = float(results['window_end_time'])
         msg.n_measurements = int(results['n_samples'])
 
-        # If the message definition supports bulk wavespec fields, initialize them.
-        if hasattr(msg, 'has_wavespec_bulk'):
-            msg.has_wavespec_bulk = False
-            msg.wavespec_hs = float('nan')
-            msg.wavespec_tp = float('nan')
-            msg.wavespec_tm01 = float('nan')
-            msg.wavespec_tm02 = float('nan')
-            msg.wavespec_dp = float('nan')
-            msg.wavespec_dm = float('nan')
-            msg.wavespec_spreadp = float('nan')
+        # Bulk wavespec defaults; filled in below when a wavespec is available.
+        msg.has_wavespec_bulk = False
+        msg.wavespec_hs = float('nan')
+        msg.wavespec_tp = float('nan')
+        msg.wavespec_tm01 = float('nan')
+        msg.wavespec_tm02 = float('nan')
+        msg.wavespec_dp = float('nan')
+        msg.wavespec_dm = float('nan')
+        msg.wavespec_spreadp = float('nan')
 
         if wavespec is not None:
             msg.frequencies = np.asarray(wavespec.f, dtype=float).flatten().tolist()
@@ -581,23 +823,29 @@ class TheNextWaveNode(Interface):
 
             msg.energy_by_freq = np.asarray(energy_by_freq, dtype=float).flatten().tolist()
 
-            # Optional bulk parameters from the directional wavespec used for prediction.
-            # These fields may not exist on older message definitions; guard with hasattr.
-            if hasattr(msg, 'has_wavespec_bulk'):
-                bulk = bulk_wave_params_from_wavespec(wavespec)
-                msg.has_wavespec_bulk = True
-                msg.wavespec_hs = float(bulk.get('Hs_m', float('nan')))
-                msg.wavespec_tp = float(bulk.get('Tp_s', float('nan')))
-                msg.wavespec_tm01 = float(bulk.get('Tm01_s', float('nan')))
-                msg.wavespec_tm02 = float(bulk.get('Tm02_s', float('nan')))
-                msg.wavespec_dp = float(bulk.get('Dp_deg', float('nan')))
-                msg.wavespec_dm = float(bulk.get('Dm_deg', float('nan')))
-                msg.wavespec_spreadp = float(bulk.get('spreadp_deg', float('nan')))
+            # Bulk parameters from the directional wavespec used for prediction.
+            bulk = bulk_wave_params_from_wavespec(wavespec)
+            msg.has_wavespec_bulk = True
+            msg.wavespec_hs = float(bulk.get('Hs_m', float('nan')))
+            msg.wavespec_tp = float(bulk.get('Tp_s', float('nan')))
+            msg.wavespec_tm01 = float(bulk.get('Tm01_s', float('nan')))
+            msg.wavespec_tm02 = float(bulk.get('Tm02_s', float('nan')))
+            msg.wavespec_dp = float(bulk.get('Dp_deg', float('nan')))
+            msg.wavespec_dm = float(bulk.get('Dm_deg', float('nan')))
+            msg.wavespec_spreadp = float(bulk.get('spreadp_deg', float('nan')))
 
         msg.centroid_period = float(results.get('Te', 0.0))
         msg.solve_time = float(results.get('solve_time', 0.0))
         msg.num_wavelengths = (
             int(getattr(params, 'kx', np.array([])).size) if params is not None else 0
+        )
+
+        # L-BFGS-B fit metrics.
+        msg.solver_error = float(
+            params.solver_error if params is not None else float('nan')
+        )
+        msg.solver_objective = float(
+            params.solver_objective if params is not None else float('nan')
         )
 
         x_target = float(results.get('x_target', 0.0))
@@ -657,40 +905,39 @@ class TheNextWaveNode(Interface):
 
         # Dense model predictions at target over measurement timestamps
         # (high-rate comparison series; future predictions remain unchanged).
-        if hasattr(msg, 'has_dense_predictions'):
-            dense_predictions_time = np.asarray(
-                results.get('dense_predictions_time', []), dtype=float
-            ).reshape((-1,))
-            dense_predictions_z = np.asarray(
-                results.get('dense_predictions_z', []), dtype=float
-            ).reshape((-1,))
-            dense_predictions_u = np.asarray(
-                results.get('dense_predictions_u', []), dtype=float
-            ).reshape((-1,))
-            dense_predictions_v = np.asarray(
-                results.get('dense_predictions_v', []), dtype=float
-            ).reshape((-1,))
+        dense_predictions_time = np.asarray(
+            results.get('dense_predictions_time', []), dtype=float
+        ).reshape((-1,))
+        dense_predictions_z = np.asarray(
+            results.get('dense_predictions_z', []), dtype=float
+        ).reshape((-1,))
+        dense_predictions_u = np.asarray(
+            results.get('dense_predictions_u', []), dtype=float
+        ).reshape((-1,))
+        dense_predictions_v = np.asarray(
+            results.get('dense_predictions_v', []), dtype=float
+        ).reshape((-1,))
 
-            n_dp = int(
-                min(
-                    dense_predictions_time.size,
-                    dense_predictions_z.size,
-                    dense_predictions_u.size,
-                    dense_predictions_v.size,
-                )
+        n_dp = int(
+            min(
+                dense_predictions_time.size,
+                dense_predictions_z.size,
+                dense_predictions_u.size,
+                dense_predictions_v.size,
             )
-            if n_dp > 0:
-                msg.has_dense_predictions = True
-                msg.dense_predictions_time = dense_predictions_time[:n_dp].tolist()
-                msg.dense_predictions_z = dense_predictions_z[:n_dp].tolist()
-                msg.dense_predictions_u = dense_predictions_u[:n_dp].tolist()
-                msg.dense_predictions_v = dense_predictions_v[:n_dp].tolist()
-            else:
-                msg.has_dense_predictions = False
-                msg.dense_predictions_time = []
-                msg.dense_predictions_z = []
-                msg.dense_predictions_u = []
-                msg.dense_predictions_v = []
+        )
+        if n_dp > 0:
+            msg.has_dense_predictions = True
+            msg.dense_predictions_time = dense_predictions_time[:n_dp].tolist()
+            msg.dense_predictions_z = dense_predictions_z[:n_dp].tolist()
+            msg.dense_predictions_u = dense_predictions_u[:n_dp].tolist()
+            msg.dense_predictions_v = dense_predictions_v[:n_dp].tolist()
+        else:
+            msg.has_dense_predictions = False
+            msg.dense_predictions_time = []
+            msg.dense_predictions_z = []
+            msg.dense_predictions_u = []
+            msg.dense_predictions_v = []
 
         t_pred = np.asarray(results.get('t_pred', []), dtype=float)
         z_pred = np.asarray(results.get('z_pred', []), dtype=float)
@@ -731,6 +978,25 @@ class TheNextWaveNode(Interface):
             pred_point.vel_east = float(u_pred[i]) if i < u_pred.size else 0.0
             pred_point.vel_north = float(v_pred[i]) if i < v_pred.size else 0.0
             msg.predictions.append(pred_point)
+
+        self.pack_buoy_predictions(msg, results, t_pred)
+
+        # Score matured forecasts, buffer this window's, publish rolling skill.
+        if self.params.forecast_skill_enable:
+            try:
+                skill, by_buoy, n_scored = self.update_forecast_skill(results)
+            except Exception as exc:  # noqa: B902 - never break publishing
+                self.get_logger().warn(f'forecast skill update failed: {exc}')
+                skill, by_buoy, n_scored = float('nan'), np.array([]), 0
+            msg.forecast_skill = float(skill)
+            msg.forecast_skill_lead_sec = float(self.params.forecast_skill_lead_sec)
+            msg.forecast_skill_n_scored = int(n_scored)
+            msg.forecast_skill_by_buoy = [float(v) for v in np.asarray(by_buoy).ravel()]
+        else:
+            msg.forecast_skill = float('nan')
+            msg.forecast_skill_lead_sec = float('nan')
+            msg.forecast_skill_n_scored = 0
+            msg.forecast_skill_by_buoy = []
 
         z_recon = np.asarray(results.get('z_recon', []), dtype=float)
         u_recon = np.asarray(results.get('u_recon', []), dtype=float)
@@ -1073,8 +1339,11 @@ class TheNextWaveNode(Interface):
         else:
             time_span_s = 0.0
 
+        # Buoys outside the configured solve/verification set still stream data
+        # (every swifts.* parameter is declared), but must not gate readiness --
+        # adding them here would stall the window on buoys this run ignores.
         if swift_num not in self.window_ready_by_swift:
-            self.window_ready_by_swift[swift_num] = False
+            return
 
         was_ready = bool(self.window_ready_by_swift.get(swift_num, False))
         # Use a small tolerance when determining readiness.
@@ -1142,6 +1411,15 @@ class TheNextWaveNode(Interface):
         )
 
         # Least-squares solver controls
+        # Buoy roles: which SWIFTs are inverted, which is held out for scoring.
+        self.declare_parameter('solve_swifts', defaults.solve_swifts)
+        self.declare_parameter('verification_swift', defaults.verification_swift)
+
+        # Optional: retrospective forecast verification at the buoys.
+        self.declare_parameter('forecast_skill_enable', defaults.forecast_skill_enable)
+        self.declare_parameter('forecast_skill_lead_sec', defaults.forecast_skill_lead_sec)
+        self.declare_parameter('forecast_skill_window_sec', defaults.forecast_skill_window_sec)
+
         self.declare_parameter('lsq_max_iter', defaults.lsq_max_iter)
         self.declare_parameter('lsq_solver_backend', defaults.lsq_solver_backend)
         self.declare_parameter('lsq_diagnostics_enable', defaults.lsq_diagnostics_enable)
@@ -1256,6 +1534,24 @@ class TheNextWaveNode(Interface):
         params.dense_prediction_window = float(self.get_parameter('dense_prediction_window').value)
         params.enable_dense_history_projection = bool(
             self.get_parameter('enable_dense_history_projection').value
+        )
+
+        params.solve_swifts = [
+            str(s).strip()
+            for s in (self.get_parameter('solve_swifts').value or [])
+            if str(s).strip()
+        ]
+        params.verification_swift = str(
+            self.get_parameter('verification_swift').value or ''
+        ).strip()
+        self.validate_swift_roles(params)
+
+        params.forecast_skill_enable = bool(self.get_parameter('forecast_skill_enable').value)
+        params.forecast_skill_lead_sec = float(
+            self.get_parameter('forecast_skill_lead_sec').value
+        )
+        params.forecast_skill_window_sec = float(
+            self.get_parameter('forecast_skill_window_sec').value
         )
 
         params.lsq_max_iter = int(self.get_parameter('lsq_max_iter').value)

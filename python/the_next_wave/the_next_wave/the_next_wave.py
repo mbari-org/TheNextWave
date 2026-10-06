@@ -35,6 +35,20 @@ from .utilities import (
 @dataclass
 class TheNextWaveConfig:
     expected_fs: float = 5.0
+
+    # Which SWIFTs feed the inversion, in column order. Any subset of the
+    # configured buoys; 3 and 4 are the supported sizes.
+    solve_swifts: tuple[str, ...] = ('swift22', 'swift23', 'swift24', 'swift25')
+
+    # Optional SWIFT held out of the inversion and used only to score
+    # forecasts. Because it never enters the solve, its residual is genuinely
+    # out of sample -- the cheap form of leave-one-out, costing one extra
+    # matvec rather than a second solve. Empty disables it.
+    verification_swift: str = ''
+
+    # When False, skip evaluating the model at the buoy locations entirely.
+    # Those forecasts exist only to be scored, so this removes their cost.
+    forecast_skill_enable: bool = True
     # Rotation applied in the lat/lon -> local x/y projection.
     # Matches MATLAB's GenericCoordinateTransform.m convention:
     #   rotation=180 → x=+East, y=+North, consistent with u=vel_e and v=vel_n.
@@ -183,7 +197,22 @@ class TheNextWave:
                 pass
 
         t0 = time.perf_counter() if prof_enabled else 0.0
-        zin, uin, vin, tin, xin, yin, fs = self.stack_measurement_data(cleaned_sbg)
+        solve_names, scored_names = self.resolve_swift_sets(cleaned_sbg)
+        if not solve_names:
+            raise ValueError('No solve SWIFTs have data in this window')
+
+        # Stack solve and verification buoys together so they share one time
+        # base and projection, then keep only the solve columns for the
+        # inversion. Column order is `scored_names`.
+        zin_all, uin_all, vin_all, tin_all, xin_all, yin_all, fs = \
+            self.stack_measurement_data(cleaned_sbg, scored_names)
+        n_solve = len(solve_names)
+        zin = zin_all[:, :n_solve]
+        uin = uin_all[:, :n_solve]
+        vin = vin_all[:, :n_solve]
+        tin = tin_all[:, :n_solve]
+        xin = xin_all[:, :n_solve]
+        yin = yin_all[:, :n_solve]
         if prof_enabled:
             prof['stack_measurement_data_s'] = time.perf_counter() - t0
         fs = float(fs)
@@ -209,7 +238,7 @@ class TheNextWave:
         wavespec_new = None
         if not use_cached:
             t0 = time.perf_counter() if prof_enabled else 0.0
-            wavespec_new = self.build_averaged_wavespec(swift_structs)
+            wavespec_new = self.build_averaged_wavespec(swift_structs, solve_names)
             if prof_enabled:
                 prof['build_averaged_wavespec_s'] = time.perf_counter() - t0
 
@@ -316,9 +345,37 @@ class TheNextWave:
         t_end = float(np.nanmax(tin[input_slice, :]))
 
         # example.py uses 1 Hz predictions: tpred = t_end + arange(1, n_lead+1)
-        tpred = t_end + np.arange(1, n_lead + 1, dtype=float)
-        xpred = np.full_like(tpred, x_target, dtype=float)
-        ypred = np.full_like(tpred, y_target, dtype=float)
+        t_lead = t_end + np.arange(1, n_lead + 1, dtype=float)
+
+        # Evaluate the solved model at the WEC target *and* at each buoy.
+        # The buoy forecasts cost one extra matvec (no extra solve) and can be
+        # verified against real measurements once those timestamps arrive,
+        # which is the only forecast-skill signal available without truth at
+        # the target. Buoys use their most recent known position, since they
+        # drift; location 0 is always the target.
+        # Positions come from the full scored set (solve buoys plus any
+        # verification buoy), so the held-out buoy gets a forecast too.
+        # These exist only to be scored, so skip them when scoring is off --
+        # that drops both the extra P2 rows and the per-window bookkeeping.
+        if not self.config.forecast_skill_enable:
+            x_buoys = np.array([], dtype=float)
+            y_buoys = np.array([], dtype=float)
+        else:
+            try:
+                x_buoys = np.asarray(xin_all[input_slice, :], dtype=float)[-1, :]
+                y_buoys = np.asarray(yin_all[input_slice, :], dtype=float)[-1, :]
+            except Exception:
+                x_buoys = np.array([], dtype=float)
+                y_buoys = np.array([], dtype=float)
+
+        pred_loc_x = np.concatenate(([float(x_target)], x_buoys))
+        pred_loc_y = np.concatenate(([float(y_target)], y_buoys))
+        n_pred_loc = int(pred_loc_x.size)
+
+        # Location-major: [loc0 @ all leads, loc1 @ all leads, ...]
+        tpred = np.tile(t_lead, n_pred_loc)
+        xpred = np.repeat(pred_loc_x, n_lead)
+        ypred = np.repeat(pred_loc_y, n_lead)
 
         # `leastSquaresWavePropagation` no longer mutates the wavespec in-place, and
         # we cache spectrum->solution-space interpolation results on the object.
@@ -352,9 +409,25 @@ class TheNextWave:
         self.A0 = params.A
 
         prediction = np.asarray(pred_vec).reshape((tpred.size, -1), order='F')
-        zout = prediction[:, 0]
-        uout = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(zout)
-        vout = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(zout)
+        z_all = prediction[:, 0]
+        u_all = prediction[:, 1] if prediction.shape[1] > 1 else np.zeros_like(z_all)
+        v_all = prediction[:, 2] if prediction.shape[1] > 2 else np.zeros_like(z_all)
+
+        # Split location-major results back out: row 0 is the target, rows 1..B
+        # are the buoys in the same column order as the measurement arrays.
+        z_by_loc = z_all.reshape((n_pred_loc, n_lead))
+        u_by_loc = u_all.reshape((n_pred_loc, n_lead))
+        v_by_loc = v_all.reshape((n_pred_loc, n_lead))
+
+        # Downstream consumers expect the target-only series under *_pred.
+        tpred = t_lead
+        zout = z_by_loc[0, :]
+        uout = u_by_loc[0, :]
+        vout = v_by_loc[0, :]
+
+        buoy_pred_z = z_by_loc[1:, :]
+        buoy_pred_u = u_by_loc[1:, :]
+        buoy_pred_v = v_by_loc[1:, :]
 
         # Dense model evaluation at the target (WEC).
         # When disabled, do not apply the solved model to any history/time series.
@@ -473,6 +546,27 @@ class TheNextWave:
                 'z_pred': zout,
                 'u_pred': uout,
                 'v_pred': vout,
+                # Forecasts at the buoy locations, shape (n_scored, n_lead),
+                # sharing `t_pred`. Column order is `buoy_pred_labels`: the
+                # solve buoys first, then the verification buoy if configured.
+                'buoy_pred_x': pred_loc_x[1:],
+                'buoy_pred_y': pred_loc_y[1:],
+                'buoy_pred_z': buoy_pred_z,
+                'buoy_pred_u': buoy_pred_u,
+                'buoy_pred_v': buoy_pred_v,
+                'buoy_pred_labels': list(scored_names),
+                'solve_swifts': list(solve_names),
+                # Index of the held-out buoy within the arrays above, or -1.
+                # When set, skill is scored against this buoy alone -- the only
+                # genuinely out-of-sample residual available.
+                'verification_index': (
+                    len(scored_names) - 1 if len(scored_names) > n_solve else -1
+                ),
+                # Measured elevation at every scored buoy, (n_samples, n_scored),
+                # on the `skill_t_meas` time base. Includes the verification
+                # buoy, which is absent from `z_meas`.
+                'skill_t_meas': tin_all[:, 0],
+                'skill_z_meas': zin_all,
                 'dense_predictions_time': dense_predictions_time,
                 'dense_predictions_z': dense_predictions_z,
                 'dense_predictions_u': dense_predictions_u,
@@ -542,7 +636,37 @@ class TheNextWave:
 
         return results
 
-    def stack_measurement_data(self, cleaned_sbg: SWIFTArray) -> tuple[np.ndarray, ...]:
+    def resolve_swift_sets(self, cleaned_sbg: SWIFTArray) -> tuple[list[str], list[str]]:
+        """
+        Return (solve_names, scored_names) for buoys that actually have data.
+
+        `solve_names` feed the inversion. `scored_names` is solve_names plus the
+        verification buoy (when configured and populated), and is the column
+        order of every buoy-indexed array leaving `process()`.
+        """
+        def has_data(name: str) -> bool:
+            sbg = getattr(cleaned_sbg, f'sbg{name[-2:]}', None)
+            return sbg is not None and len(sbg.ShipMotion.heave) > 0
+
+        solve_names = [n for n in self.config.solve_swifts if has_data(n)]
+
+        verif = str(self.config.verification_swift or '').strip()
+        scored_names = list(solve_names)
+        if verif and verif not in solve_names:
+            if has_data(verif):
+                scored_names.append(verif)
+            elif self.logger is not None:
+                self.logger.warn(
+                    f'verification_swift={verif} has no data this window; '
+                    'scoring against the solve buoys instead'
+                )
+        return solve_names, scored_names
+
+    def stack_measurement_data(
+        self,
+        cleaned_sbg: SWIFTArray,
+        swift_names: list[str] | None = None,
+    ) -> tuple[np.ndarray, ...]:
         """
         Stack buoy measurement windows into solver-ready matrices.
 
@@ -554,9 +678,14 @@ class TheNextWave:
         Use `rotation_deg = 180` (MATLAB convention) so that x=+East and y=+North,
         consistent with u=vel_e and v=vel_n.
         """
+        if swift_names is None:
+            swift_names = [f'swift{n}' for n in range(22, 26)]
+
+        # Column order follows swift_names exactly, so callers can slice the
+        # result by position (e.g. solve columns first, verification last).
         sbgs: list[SBGData] = []
-        for swift_num in range(22, 26):
-            sbg = getattr(cleaned_sbg, f'sbg{swift_num}', None)
+        for name in swift_names:
+            sbg = getattr(cleaned_sbg, f'sbg{name[-2:]}', None)
             if sbg is not None and len(sbg.ShipMotion.heave) > 0:
                 sbgs.append(sbg)
 
@@ -575,9 +704,18 @@ class TheNextWave:
             flip_z_sign=bool(self.config.flip_z_sign),
         )
 
-    def build_averaged_wavespec(self, swift_structs: SWIFTArray) -> WaveSpec:
+    def build_averaged_wavespec(
+        self,
+        swift_structs: SWIFTArray,
+        swift_names: list[str] | None = None,
+    ) -> WaveSpec:
+        # Only the solve buoys contribute: a held-out verification buoy must not
+        # influence the spectrum any more than it influences the inversion.
+        if swift_names is None:
+            swift_names = list(self.config.solve_swifts)
+
         swifts = []
-        for swift_name in ('swift22', 'swift23', 'swift24', 'swift25'):
+        for swift_name in swift_names:
             swift_data = getattr(swift_structs, swift_name, None)
             if swift_data is not None and swift_data.wavespectra.energy.size > 0:
                 swifts.append(swift_data)

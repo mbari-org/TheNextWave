@@ -42,6 +42,28 @@
     # For SWIFT bridge + replay only
     sbg_bridge_use_example_frame: false
 
+    # Which SWIFTs feed the inversion. Supported sizes are 4 (all) or 3.
+    # Window readiness gates on these buoys only, so a buoy left out here does
+    # not have to be streaming for the node to process.
+    solve_swifts: ['swift22', 'swift23', 'swift24', 'swift25']
+
+    # Optional SWIFT held OUT of the inversion and used only to score forecasts.
+    # Must not appear in solve_swifts. Because the solve never sees it, its
+    # residual is genuinely out of sample -- leave-one-out for the price of one
+    # extra matvec rather than a second solve. Empty string disables it.
+    #
+    #   4-buoy run:                solve_swifts = all four, verification_swift = ''
+    #   3-buoy run:                solve_swifts = any three, verification_swift = ''
+    #   3-buoy + verification:     solve_swifts = any three, verification_swift = the fourth
+    verification_swift: ''
+
+    # Retrospective forecast verification at the buoy locations. When false, the
+    # model is not evaluated at the buoys at all and no skill is published --
+    # set it false if the extra per-window work is not worth the cost.
+    forecast_skill_enable: true
+    forecast_skill_lead_sec: 4.0
+    forecast_skill_window_sec: 140.0
+
     # SWIFT buoy index mapping for latent_data incident wave height providing (u,v,eta). Matches the
     # order of points added to buoy_gazebo::IncWaveHeight plugin in:
     #     `mbari_wec_gz/buoy_description/models/mbari_wec_ros/model.sdf`.

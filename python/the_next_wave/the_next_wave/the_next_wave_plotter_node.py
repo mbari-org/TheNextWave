@@ -167,15 +167,12 @@ class TheNextWavePlotterNode(Node):
 
         self.maybe_reset_for_time_rollback(time_ref)
 
-        # Dense target predictions series (optional)
-        has_dense_predictions = bool(getattr(msg, 'has_dense_predictions', False))
-        dense_predictions_time = np.asarray(
-            getattr(msg, 'dense_predictions_time', []),
-            dtype=float,
-        )
-        dense_predictions_z = np.asarray(getattr(msg, 'dense_predictions_z', []), dtype=float)
-        dense_predictions_u = np.asarray(getattr(msg, 'dense_predictions_u', []), dtype=float)
-        dense_predictions_v = np.asarray(getattr(msg, 'dense_predictions_v', []), dtype=float)
+        # Dense target predictions series
+        has_dense_predictions = bool(msg.has_dense_predictions)
+        dense_predictions_time = np.asarray(msg.dense_predictions_time, dtype=float)
+        dense_predictions_z = np.asarray(msg.dense_predictions_z, dtype=float)
+        dense_predictions_u = np.asarray(msg.dense_predictions_u, dtype=float)
+        dense_predictions_v = np.asarray(msg.dense_predictions_v, dtype=float)
         n_dp = int(
             min(
                 dense_predictions_time.size,
@@ -196,11 +193,9 @@ class TheNextWavePlotterNode(Node):
             dense_predictions_u = dense_predictions_u[:n_dp]
             dense_predictions_v = dense_predictions_v[:n_dp]
 
-        use_msg_series = bool(getattr(msg, 'has_wec_actual_series', False)) and (
-            len(getattr(msg, 'wec_series_time', [])) > 0
-        )
+        use_msg_series = bool(msg.has_wec_actual_series) and len(msg.wec_series_time) > 0
         if not use_msg_series and bool(msg.has_wec_actual):
-            # Backward-compatible fallback: single sample per message.
+            # Fallback when the series is empty: single sample per message.
             self.wec_hist.append(
                 (float(msg.wec_time), float(msg.wec_z), float(msg.wec_u), float(msg.wec_v))
             )
@@ -217,10 +212,10 @@ class TheNextWavePlotterNode(Node):
                 self.wec_hist.popleft()
 
         if use_msg_series:
-            t_wec_hist = np.asarray(getattr(msg, 'wec_series_time', []), dtype=float)
-            z_wec_hist = np.asarray(getattr(msg, 'wec_series_z', []), dtype=float)
-            u_wec_hist = np.asarray(getattr(msg, 'wec_series_u', []), dtype=float)
-            v_wec_hist = np.asarray(getattr(msg, 'wec_series_v', []), dtype=float)
+            t_wec_hist = np.asarray(msg.wec_series_time, dtype=float)
+            z_wec_hist = np.asarray(msg.wec_series_z, dtype=float)
+            u_wec_hist = np.asarray(msg.wec_series_u, dtype=float)
+            v_wec_hist = np.asarray(msg.wec_series_v, dtype=float)
         else:
             t_wec_hist = np.array([p[0] for p in self.wec_hist], dtype=float)
             z_wec_hist = np.array([p[1] for p in self.wec_hist], dtype=float)
@@ -237,11 +232,11 @@ class TheNextWavePlotterNode(Node):
         u_wec = float(msg.wec_u) if bool(msg.has_wec_actual) else None
         v_wec = float(msg.wec_v) if bool(msg.has_wec_actual) else None
 
-        has_wavespec_bulk = bool(getattr(msg, 'has_wavespec_bulk', False))
-        wavespec_hs = float(getattr(msg, 'wavespec_hs', float('nan')))
-        wavespec_tp = float(getattr(msg, 'wavespec_tp', float('nan')))
-        wavespec_dp = float(getattr(msg, 'wavespec_dp', float('nan')))
-        wavespec_spreadp = float(getattr(msg, 'wavespec_spreadp', float('nan')))
+        has_wavespec_bulk = bool(msg.has_wavespec_bulk)
+        wavespec_hs = float(msg.wavespec_hs)
+        wavespec_tp = float(msg.wavespec_tp)
+        wavespec_dp = float(msg.wavespec_dp)
+        wavespec_spreadp = float(msg.wavespec_spreadp)
 
         d = LivePlotData(
             x_meas=x_meas,

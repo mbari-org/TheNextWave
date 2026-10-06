@@ -99,13 +99,12 @@ def solve_box_lbfgsb_jax(
 
     x = np.array(result.params, dtype=np.float64)
 
+    r = P @ x - b
+    objective = 0.5 * float(r @ r)
     if print_losses:
-        r = P @ x - b
-        data_loss = 0.5 * float(r @ r)
-        print(
-            f'JAX loss:  total={data_loss:.6e}  data={data_loss:.6e}',
-            flush=True,
-        )
+        # There is no regularization term, so the old `total=` and `data=`
+        # were always the same number; report the one value.
+        print(f'JAX objective: {objective:.6e}', flush=True)
 
     class Result:
         pass
@@ -114,6 +113,9 @@ def solve_box_lbfgsb_jax(
     info.x = x
     info.nit = int(result.state.iter_num)
     info.fun = float(result.state.value)
+    # jaxopt's convergence criterion (projected-gradient norm); `gtol` tests it.
+    info.error = float(result.state.error)
+    info.objective = objective
     info.success = bool(result.state.error <= gtol)
     info.status = 0 if info.success else 1
     info.message = (
