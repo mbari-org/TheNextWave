@@ -393,7 +393,7 @@ class TheNextWaveNode(Interface):
             f' :: lag={self.window_max_lag_s:.1f}s'
             f' :: overlap={self.window_overlap_s:.1f}s'
             f'/{self.params.window_duration_sec:.0f}s'
-            f' :: {ref_name} n={len(stamps)} samples'
+            #f' :: {ref_name} n={len(stamps)} samples'
             f' :: t={time_span_s:.3f} s'
             f' :: [{" | ".join(parts)}]'
         )

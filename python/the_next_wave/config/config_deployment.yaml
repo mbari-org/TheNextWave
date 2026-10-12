@@ -42,20 +42,20 @@
     # only to score forecasts. It influences neither the solve nor the averaged
     # wavespec, so its genuinely leave-one-out
     solve_swifts: ['swift22', 'swift23', 'swift24']
-    verification_swift: 'swift25'
+    verification_swift: ''  # 'swift25'
 
     # Score forecasts at every buoy once their timestamps are measured.
     # forecast_skill pools all of them; forecast_skill_by_buoy keeps them
     # separate, and verification_buoy_index points at swift25 -- the only
     # entry whose residual is out of sample.
-    forecast_skill_enable: true
+    forecast_skill_enable: false
     forecast_skill_lead_sec: 4.0
     forecast_skill_window_sec: 140.0
 
     # Least-squares solver tuning
-    lsq_max_iter: 60
-    lsq_solver_backend: auto  # auto | jax | scipy
-    lsq_diagnostics_enable: true
+    lsq_max_iter: 5
+    lsq_solver_backend: jax  # auto | jax | scipy
+    lsq_diagnostics_enable: false
     lsq_near_bound_ratio: 0.95
 
     # Optional MEM stabilization (disabled by default; diverges from MATLAB).
