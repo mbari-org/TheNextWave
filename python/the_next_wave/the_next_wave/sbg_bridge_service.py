@@ -15,6 +15,47 @@ from .readAndDecodeFromEthernetBridge import iter_sbg_headers
 from .rolling_csv_logger import RollingCsvLogger
 
 
+# SBG_ECOM_LOG_UTC_TIME status bitfield, per sbgECom's sbgEComLogUtc.c:
+#   bit 0    : has clock input
+#   bits 1-4 : clock state  0=ERROR 1=FREE_RUNNING 2=STEERING 3=VALID
+#   bit 5    : UTC is accurate
+#   bits 6-9 : UTC status   0=INVALID 1=NO_LEAP_SEC 2=INITIALIZED
+SBG_CLOCK_STATE_NAMES = {0: 'ERROR', 1: 'FREE_RUNNING', 2: 'STEERING', 3: 'VALID'}
+SBG_UTC_STATUS_NAMES = {0: 'INVALID', 1: 'NO_LEAP_SEC', 2: 'INITIALIZED'}
+SBG_UTC_STATUS_INITIALIZED = 2
+
+
+def sbg_clock_state(clock_status: int) -> int:
+    return (int(clock_status) >> 1) & 0x0F
+
+
+def sbg_utc_status(clock_status: int) -> int:
+    return (int(clock_status) >> 6) & 0x0F
+
+
+def sbg_utc_time_is_usable(clock_status: int) -> bool:
+    """
+    Report whether the SBG has fully resolved UTC.
+
+    Before GPS lock the unit still emits UTC_TIME, sourced from its internal
+    clock and flagged not-yet-valid; taking that at face value yields
+    timestamps off by the RTC drift and then a jump when lock is acquired.
+    NO_LEAP_SEC is rejected too: time is known but the leap-second offset is
+    not, an ~18 s error -- larger than the entire prediction horizon.
+    """
+    return sbg_utc_status(clock_status) == SBG_UTC_STATUS_INITIALIZED
+
+
+def describe_clock_status(clock_status: int) -> str:
+    cs = sbg_clock_state(clock_status)
+    us = sbg_utc_status(clock_status)
+    return (
+        f'clock_status=0x{int(clock_status):04x} '
+        f'clock_state={SBG_CLOCK_STATE_NAMES.get(cs, cs)} '
+        f'utc_status={SBG_UTC_STATUS_NAMES.get(us, us)}'
+    )
+
+
 def utc_message_to_epoch_us(data_struct: dict) -> float:
     minute_start = datetime(
         year=data_struct.get('year'),
@@ -62,6 +103,9 @@ class SbgBridgeService:
         self.last_status_t_us_by_swift: dict[int, int] = {}
         self.burst_start_t_us_by_swift: dict[int, int] = {}
         self.last_warn_walltime_by_swift: dict[int, float] = {}
+        self.last_clock_warn_walltime_by_swift: dict[int, float] = {}
+        # Log the first good UTC per buoy so GPS lock is visible in the log.
+        self.utc_ok_logged_by_swift: dict[int, bool] = {}
         self.swift_data_logger = {
                 22: None,
                 23: None,
@@ -323,6 +367,27 @@ class SbgBridgeService:
                     return
 
             if id2name[msg_id] == 'UtcTime':
+                # Drop the sample unless the SBG says UTC is fully resolved.
+                # Leaving t_utc unset means the record never completes, so it
+                # is never ingested -- keeping pre-GPS-lock timestamps out of
+                # the window instead of letting them land hours from wall clock.
+                clock_status = data_struct.get('clock_status', 0)
+                if not sbg_utc_time_is_usable(clock_status):
+                    now = time.monotonic()
+                    last = float(self.last_clock_warn_walltime_by_swift.get(swift_num, 0.0))
+                    if now - last > 10.0:
+                        self.last_clock_warn_walltime_by_swift[swift_num] = now
+                        self.logger.warn(
+                            f'swift{swift_num} rejecting samples: '
+                            f'{describe_clock_status(clock_status)} '
+                            '(waiting for GPS lock / leap seconds)'
+                        )
+                    return
+                if not self.utc_ok_logged_by_swift.get(swift_num):
+                    self.utc_ok_logged_by_swift[swift_num] = True
+                    self.logger.info(
+                        f'swift{swift_num} UTC resolved: {describe_clock_status(clock_status)}'
+                    )
                 try:
                     rec['t_utc'] = utc_message_to_epoch_us(data_struct)
                 except Exception as err:
