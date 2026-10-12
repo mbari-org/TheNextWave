@@ -16,7 +16,9 @@ maintainers = [{ name = "anderson", email = "anderson@mbari.org" }]
 
 dependencies = [
     "matplotlib>=3.10.8",
+    "plotext>=5.3.2",
     "pooch>=1.9.0",
+    "rich>=14.0.0",
     "pyarrow>=23.0.0",
     "setuptools>=82.0.0",
     "tqdm>=4.67.3",
@@ -57,6 +59,7 @@ the_next_wave_example_loo = "the_next_wave.example_loo:main"
 the_next_wave_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_sim_node = "the_next_wave.the_next_wave_node:main"
 the_next_wave_plotter_node = "the_next_wave.the_next_wave_plotter_node:main"
+the_next_wave_tui_node = "the_next_wave.the_next_wave_tui_node:main"
 the_next_wave_sbg_tcp_replay_node = "the_next_wave.sbg_tcp_replay_node:main"
 
 [[tool.uv.index]]
