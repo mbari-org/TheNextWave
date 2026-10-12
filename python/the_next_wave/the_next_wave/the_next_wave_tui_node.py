@@ -510,12 +510,31 @@ class TheNextWaveTuiNode(Interface):
         return root
 
 
+def check_plotext() -> None:
+    """
+    Fail at startup, not inside a render, if plotext is the wrong one.
+
+    These names have all been stable since plotext 5.0. Missing ones mean an
+    older release or a different module of the same name on the path, and the
+    first symptom is otherwise a traceback several frames deep inside rich.
+    """
+    required = ('clf', 'plot_size', 'theme', 'plot', 'vertical_line',
+                'build', 'title', 'xlabel', 'ylabel')
+    missing = [n for n in required if not hasattr(plt, n)]
+    if missing:
+        raise SystemExit(
+            f'[tui] plotext at {getattr(plt, "__file__", "?")} is missing '
+            f'{missing}. Need plotext >= 5.2: pip install -U "plotext>=5.3.2"'
+        )
+
+
 def main(args=None):
     # Unconditional, before anything can swallow it: says which file is really
     # running and what it was told, without depending on ROS parameters.
     print(f'[tui] module={__file__} argv={sys.argv} '
           f'TNW_HEADLESS={os.environ.get("TNW_HEADLESS", "")!r}',
           file=sys.stderr, flush=True)
+    check_plotext()
 
     rclpy.init(args=args)
     node = TheNextWaveTuiNode()
