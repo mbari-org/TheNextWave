@@ -162,6 +162,17 @@ class TheNextWaveTuiNode(Interface):
 
         self.ensure_prediction_subscription()
 
+        # Proof that the executor is actually servicing this node's callbacks.
+        # Without it, "no messages" is ambiguous between a dead spin thread and
+        # endpoints that never matched.
+        self.n_ticks = 0
+        self.tick_timer = self.create_timer(
+            1.0, self.tick_callback, callback_group=self.cb_sub,
+        )
+
+    def tick_callback(self) -> None:
+        self.n_ticks += 1
+
     def ensure_prediction_subscription(self) -> None:
         """
         Guarantee a /wave_predictions subscription exists.
@@ -235,6 +246,11 @@ class TheNextWaveTuiNode(Interface):
         g.add_row(
             'publishers seen',
             Text(str(n_pub), style='bold red' if n_pub == 0 else 'green'),
+        )
+        g.add_row(
+            'executor ticks',
+            Text(str(self.n_ticks),
+                 style='bold red' if self.n_ticks == 0 else 'green'),
         )
         g.add_row('messages', str(self.n_received))
         body = g
