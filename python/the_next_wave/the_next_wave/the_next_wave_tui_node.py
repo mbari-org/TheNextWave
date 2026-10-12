@@ -565,8 +565,12 @@ def main(args=None):
 
     console = Console()
     try:
+        # auto_refresh=False: no background repaint thread. Every frame is
+        # painted synchronously from this loop, so what is on screen is always
+        # the frame this iteration built, and there is no second thread
+        # contending for the console while the executor runs.
         with Live(node.render(), console=console, screen=True,
-                  refresh_per_second=node.refresh_hz) as live:
+                  auto_refresh=False) as live:
             while rclpy.ok():
                 # Service callbacks for one frame's worth of time, then redraw.
                 deadline = time.monotonic() + period
@@ -577,7 +581,7 @@ def main(args=None):
                 except Exception:
                     frame = Panel(Text(traceback.format_exc(), style='red'),
                                   title='render error', border_style='red')
-                live.update(frame)
+                live.update(frame, refresh=True)
     except KeyboardInterrupt:
         pass
     finally:
