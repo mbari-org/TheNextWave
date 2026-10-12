@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections import deque
 import threading
 import time
+import traceback
 from typing import Callable, Optional
 
 from buoy_api.interface import Interface
@@ -153,21 +154,56 @@ class TheNextWaveTuiNode(Interface):
         self.latest: Optional[WavePredictionOutput] = None
         self.n_received = 0
         self.last_rx_wall = 0.0
+        self.last_error = ''
 
         # Fallback WEC history for when the message carries a single sample
         # rather than a series (`publish_wec_series: false`).
         self.wec_hist: deque = deque()
 
-        self.get_logger().info('TUI subscribing to /wave_predictions')
+        self.ensure_prediction_subscription()
 
-    # Defining this here, on the leaf class, is what makes the base Interface
-    # create the /wave_predictions subscription -- it checks the derived
-    # class __dict__ for overridden callbacks.
+    def ensure_prediction_subscription(self) -> None:
+        """
+        Guarantee a /wave_predictions subscription exists.
+
+        The base Interface only subscribes when it finds a callback name from
+        its own internal list in this class's __dict__, so the override only
+        takes effect if the name matches that version of buoy_api exactly. Look
+        at what it actually created and fill the gap, instead of trusting the
+        name to line up.
+        """
+        self.subs_ = getattr(self, 'subs_', [])
+        existing = [s.topic_name for s in self.subs_]
+        if any(t.rstrip('/').endswith('wave_predictions') for t in existing):
+            self.get_logger().info(f'Interface already subscribed: {existing}')
+            return
+
+        self.subs_.append(self.create_subscription(
+            WavePredictionOutput,
+            '/wave_predictions',
+            self.prediction_callback,
+            10,
+            callback_group=self.cb_sub,
+        ))
+        self.get_logger().info(
+            'Interface did not subscribe to /wave_predictions '
+            f'(it made {existing}); subscribed directly.'
+        )
+
     def prediction_callback(self, data: WavePredictionOutput) -> None:
-        with self.lock:
-            self.latest = data
-            self.n_received += 1
-            self.last_rx_wall = self.now_wall()
+        # A MultiThreadedExecutor runs callbacks on a thread pool and never
+        # retrieves the future, so anything raised here vanishes without a
+        # traceback and the display simply never updates. Catch it and put it
+        # on screen.
+        try:
+            with self.lock:
+                self.latest = data
+                self.n_received += 1
+                self.last_rx_wall = self.now_wall()
+                self.last_error = ''
+        except Exception:
+            with self.lock:
+                self.last_error = traceback.format_exc()
 
     def now_wall(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -175,6 +211,36 @@ class TheNextWaveTuiNode(Interface):
     def snapshot(self) -> tuple[Optional[WavePredictionOutput], int, float]:
         with self.lock:
             return self.latest, self.n_received, self.last_rx_wall
+
+    def waiting_panel(self) -> Panel:
+        """
+        Explain the wait rather than just showing it.
+
+        Nothing arriving has three distinct causes -- no subscription, no
+        publisher, or a callback that is throwing -- and under a
+        MultiThreadedExecutor all three look identical from outside. Print the
+        state that tells them apart.
+        """
+        topics = [s.topic_name for s in getattr(self, 'subs_', [])]
+        try:
+            n_pub = self.count_publishers('/wave_predictions')
+        except Exception:
+            n_pub = -1
+
+        g = Table.grid(padding=(0, 2))
+        g.add_column(justify='right', style='dim')
+        g.add_column()
+        g.add_row('state', Text('waiting for /wave_predictions', style='yellow'))
+        g.add_row('subscribed to', ', '.join(topics) or Text('NOTHING', style='bold red'))
+        g.add_row(
+            'publishers seen',
+            Text(str(n_pub), style='bold red' if n_pub == 0 else 'green'),
+        )
+        g.add_row('messages', str(self.n_received))
+        body = g
+        if self.last_error:
+            body = Group(g, Text(self.last_error, style='red'))
+        return Panel(body, title='the next wave', border_style='cyan')
 
     # ---------- decoding ----------
 
@@ -387,10 +453,7 @@ class TheNextWaveTuiNode(Interface):
         msg, n_rx, last_rx = self.snapshot()
         root = Layout()
         if msg is None:
-            root.update(Panel(
-                Text('waiting for /wave_predictions ...', style='dim'),
-                title='the next wave', border_style='cyan',
-            ))
+            root.update(self.waiting_panel())
             return root
 
         d = self.decode(msg)
@@ -431,7 +494,12 @@ def main(args=None):
         with Live(node.render(), console=console, screen=True,
                   refresh_per_second=node.refresh_hz) as live:
             while rclpy.ok() and spin_thread.is_alive():
-                live.update(node.render())
+                try:
+                    frame = node.render()
+                except Exception:
+                    frame = Panel(Text(traceback.format_exc(), style='red'),
+                                  title='render error', border_style='red')
+                live.update(frame)
                 # Live repaints on its own clock; this paces how often a frame
                 # is rebuilt, which is where the plotext work happens.
                 time.sleep(1.0 / node.refresh_hz)
