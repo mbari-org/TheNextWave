@@ -697,6 +697,18 @@ class TheNextWaveNode(Interface):
             and self.window_max_lag_s <= self.params.window_max_lag_sec
         )
 
+    def get_point_param(self, name: str) -> list:
+        """
+        Read one prediction_points array, tolerating it being left unset.
+
+        These are declared statically typed with no default, because rclpy
+        infers a parameter's type from its default value and would read an
+        empty list as BYTE_ARRAY. get_parameter raises on an uninitialized
+        statically typed parameter; get_parameter_or returns the alternative.
+        """
+        param = self.get_parameter_or(name, Parameter(name, Parameter.Type.NOT_SET))
+        return list(param.value or [])
+
     def validate_prediction_points(self, params: 'TheNextWaveNodeParams') -> None:
         """
         Check the prediction-point arrays line up and raise on a bad set.
@@ -1839,23 +1851,27 @@ class TheNextWaveNode(Interface):
 
         params.lat_origin = float(self.get_parameter('lat_origin').value)
         params.lon_origin = float(self.get_parameter('lon_origin').value)
+        # Read through get_parameter_or: these are declared statically typed
+        # with no default, and get_parameter raises on an uninitialized one.
+        # get_parameter_or hands back the alternative instead, so a config that
+        # names no extra points reads as empty rather than throwing.
         params.prediction_point_latlon_names = [
-            str(s) for s in (self.get_parameter('prediction_points.latlon_names').value or [])
+            str(s) for s in (self.get_point_param('prediction_points.latlon_names'))
         ]
         params.prediction_point_lats = [
-            float(v) for v in (self.get_parameter('prediction_points.lats').value or [])
+            float(v) for v in (self.get_point_param('prediction_points.lats'))
         ]
         params.prediction_point_lons = [
-            float(v) for v in (self.get_parameter('prediction_points.lons').value or [])
+            float(v) for v in (self.get_point_param('prediction_points.lons'))
         ]
         params.prediction_point_xy_names = [
-            str(s) for s in (self.get_parameter('prediction_points.xy_names').value or [])
+            str(s) for s in (self.get_point_param('prediction_points.xy_names'))
         ]
         params.prediction_point_xs = [
-            float(v) for v in (self.get_parameter('prediction_points.xs').value or [])
+            float(v) for v in (self.get_point_param('prediction_points.xs'))
         ]
         params.prediction_point_ys = [
-            float(v) for v in (self.get_parameter('prediction_points.ys').value or [])
+            float(v) for v in (self.get_point_param('prediction_points.ys'))
         ]
         self.validate_prediction_points(params)
 
