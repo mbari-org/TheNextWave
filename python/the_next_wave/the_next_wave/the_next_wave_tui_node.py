@@ -134,6 +134,11 @@ class TheNextWaveTuiNode(Interface):
         # No PB microcontroller services are used here, so don't block on them.
         super().__init__('the_next_wave_tui_node', check_for_services=False)
 
+        # Live deployment: wall clock, never /clock. The tick timer below runs
+        # on the node clock and would never fire on sim time without a /clock
+        # publisher.
+        self.use_sim_time(False)
+
         self.declare_parameter('buoy_index', 0)
         self.declare_parameter('history_sec', 60.0)
         self.declare_parameter('refresh_hz', 4.0)
@@ -500,28 +505,34 @@ def main(args=None):
     rclpy.init(args=args)
     node = TheNextWaveTuiNode()
 
+    # Interface requires a MultiThreadedExecutor, and its spin() docstring says
+    # a non-blocking spin driven from your own loop is the supported
+    # alternative. Do that in the main thread: rich.Live needs the main thread
+    # only for output, and spinning here means there is no second thread whose
+    # liveness has to be reasoned about.
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
-    spin_thread.start()
 
+    period = 1.0 / node.refresh_hz
     console = Console()
     try:
         with Live(node.render(), console=console, screen=True,
                   refresh_per_second=node.refresh_hz) as live:
-            while rclpy.ok() and spin_thread.is_alive():
+            while rclpy.ok():
+                # Service callbacks for one frame's worth of time, then redraw.
+                deadline = time.monotonic() + period
+                while rclpy.ok() and time.monotonic() < deadline:
+                    executor.spin_once(timeout_sec=period / 4.0)
                 try:
                     frame = node.render()
                 except Exception:
                     frame = Panel(Text(traceback.format_exc(), style='red'),
                                   title='render error', border_style='red')
                 live.update(frame)
-                # Live repaints on its own clock; this paces how often a frame
-                # is rebuilt, which is where the plotext work happens.
-                time.sleep(1.0 / node.refresh_hz)
     except KeyboardInterrupt:
         pass
     finally:
+        executor.remove_node(node)
         executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
