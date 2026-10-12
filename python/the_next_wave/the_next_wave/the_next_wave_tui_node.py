@@ -513,7 +513,7 @@ def main(args=None):
     # only for output, and spinning here means there is no second thread whose
     # liveness has to be reasoned about.
     executor = MultiThreadedExecutor()
-    executor.add_node(node)
+    added = executor.add_node(node)
 
     period = 1.0 / node.refresh_hz
 
@@ -521,8 +521,13 @@ def main(args=None):
         # Same executor, same loop, no rich. If ticks climb here but not in the
         # TUI, the display layer is at fault; if they stay at zero in both, it
         # never was.
-        print(f'[tui] headless; subscribed to '
-              f'{[s.topic_name for s in node.subs_]}', flush=True)
+        # add_node returns False if the node already belongs to an executor,
+        # in which case spin_once here services nothing. timers/subscriptions
+        # say whether the entities exist on the node at all.
+        print(f'[tui] headless; add_node={added} '
+              f'owned={node.executor is executor} '
+              f'timers={len(node.timers)} subs={len(node.subscriptions)} '
+              f'topics={[s.topic_name for s in node.subs_]}', flush=True)
         try:
             while rclpy.ok():
                 deadline = time.monotonic() + period
