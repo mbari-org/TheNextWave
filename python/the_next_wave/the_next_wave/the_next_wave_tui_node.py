@@ -514,17 +514,20 @@ def check_plotext() -> None:
     """
     Fail at startup, not inside a render, if plotext is the wrong one.
 
-    These names have all been stable since plotext 5.0. Missing ones mean an
-    older release or a different module of the same name on the path, and the
-    first symptom is otherwise a traceback several frames deep inside rich.
+    plotext 6 is a rewrite: these module-level functions are gone, plotting
+    goes through signal objects, and build() returns a matrix rather than the
+    ANSI string the rich panels decode. Without this check the first symptom is
+    a traceback several frames deep inside rich's renderer.
     """
     required = ('clf', 'plot_size', 'theme', 'plot', 'vertical_line',
                 'build', 'title', 'xlabel', 'ylabel')
     missing = [n for n in required if not hasattr(plt, n)]
     if missing:
         raise SystemExit(
-            f'[tui] plotext at {getattr(plt, "__file__", "?")} is missing '
-            f'{missing}. Need plotext >= 5.2: pip install -U "plotext>=5.3.2"'
+            f'[tui] plotext at {getattr(plt, "__file__", "?")} '
+            f'(version {getattr(plt, "__version__", "?")}) is missing '
+            f'{missing}. This node needs the 5.x API: '
+            f'pip install -U "plotext>=5.3.2,<6"'
         )
 
 

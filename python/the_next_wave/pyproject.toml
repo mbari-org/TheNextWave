@@ -16,9 +16,13 @@ maintainers = [{ name = "anderson", email = "anderson@mbari.org" }]
 
 dependencies = [
     "matplotlib>=3.10.8",
-    "plotext>=5.3.2",
+    # <6 is required, not caution: plotext 6 is a rewrite whose build() returns
+    # a matrix instead of an ANSI string, which is what the rich panels decode.
+    "plotext>=5.3.2,<6",
     "pooch>=1.9.0",
-    "rich>=14.0.0",
+    # 11.2 is what Ubuntu 22.04 ships; the whole TUI render path was verified
+    # against it, so don't force an upgrade of the distro package.
+    "rich>=11.2.0",
     "pyarrow>=23.0.0",
     "setuptools>=82.0.0",
     "tqdm>=4.67.3",
