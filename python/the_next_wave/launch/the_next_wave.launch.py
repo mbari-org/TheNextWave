@@ -322,12 +322,14 @@ def generate_launch_description() -> LaunchDescription:
             # Networked bridge/replay modes need inter-host DDS visibility.
             SetEnvironmentVariable(
                 name='RMW_IMPLEMENTATION',
-                value='rmw_fastrtps_cpp',
+                # value='rmw_fastrtps_cpp',
+                value='rmw_cyclonedds_cpp',
                 condition=IfCondition(enable_sbg_bridge),
             ),
             SetEnvironmentVariable(
                 name='RMW_IMPLEMENTATION',
-                value='rmw_fastrtps_cpp',
+                #value='rmw_fastrtps_cpp',
+                value='rmw_cyclonedds_cpp',
                 condition=IfCondition(enable_sbg_tcp_replay),
             ),
             SetEnvironmentVariable(
@@ -406,12 +408,14 @@ def generate_launch_description() -> LaunchDescription:
             ),
             LogInfo(
                 msg='the_next_wave: forcing DDS env for network mode: '
-                    'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                    #'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                    'RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, ROS_LOCALHOST_ONLY=0',
                 condition=IfCondition(enable_sbg_bridge),
             ),
             LogInfo(
                 msg='the_next_wave: forcing DDS env for network mode: '
-                    'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                    #'RMW_IMPLEMENTATION=rmw_fastrtps_cpp, ROS_LOCALHOST_ONLY=0',
+                    'RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, ROS_LOCALHOST_ONLY=0',
                 condition=IfCondition(enable_sbg_tcp_replay),
             ),
 
