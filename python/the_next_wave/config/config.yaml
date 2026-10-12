@@ -2,6 +2,11 @@
 /the_next_wave_node:
   ros__parameters:
     processing_interval_sec: 0.5
+    # Window ends at the newest instant all solve buoys have data for, so a
+    # trailing buoy pulls the window back rather than being dropped. This caps
+    # how far behind that window may sit before solving is skipped; replayed
+    # backfill is contiguous and valid but can be an hour stale.
+    window_max_lag_sec: 60.0
     # In gz sim, z is already up-positive. Do NOT apply the SWIFT SBG mount correction.
     flip_z_sign: false
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).

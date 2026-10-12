@@ -11,6 +11,11 @@
 /the_next_wave_node:
   ros__parameters:
     processing_interval_sec: 0.5
+    # Window ends at the newest instant all solve buoys have data for, so a
+    # trailing buoy pulls the window back rather than being dropped. This caps
+    # how far behind that window may sit before solving is skipped; replayed
+    # backfill is contiguous and valid but can be an hour stale.
+    window_max_lag_sec: 60.0
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
@@ -63,13 +68,10 @@
     sbg_bridge_bind: 0.0.0.0
     sbg_bridge_swift_warm_start_us: 45000000
 
-    # Note on SBG stream handling: reads are blocking and buffered, with no
-    # read timeout. A vanished peer is detected by TCP keepalive (~30 s), which
-    # is the only mechanism that tells "SWIFT alive but between hourly bursts"
-    # apart from "SWIFT gone" -- silence alone cannot, given the ~20 min
-    # inter-burst gap. A read timeout was rejected because it can fire
-    # mid-message and corrupt the buffered reader, which is likely in the water
-    # where links drop mid-message.
+    # SBG stream reads are blocking and buffered, with no read timeout. A
+    # vanished peer is detected by TCP keepalive (~30 s), which distinguishes
+    # "SWIFT alive but between hourly bursts" from "SWIFT gone"; silence alone
+    # cannot, given the ~20 min inter-burst gap.
 
 /the_next_wave_plotter_node:
   ros__parameters:

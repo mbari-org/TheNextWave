@@ -150,8 +150,7 @@ def solve_box_lbfgsb(
     r = P @ x - b
     objective = 0.5 * float(r @ r)
     if print_losses:
-        # No regularization term, so the old `total=` and `data=` were always
-        # the same number; report the one value.
+        # The objective has no regularization term, so there is one value.
         print(f'SciPy objective: {objective:.6e}', flush=True)
 
     # Match the jax backend's reporting: `error` is the projected-gradient
@@ -500,6 +499,23 @@ def leastSquaresWavePropagation(
     amps = np.concatenate((amps_base, amps_base), axis=0).astype(np.float32, copy=False)
 
     # reshape coordinates for phi matrices (float32 for faster trig + lower memory bandwidth)
+    # Re-base time to the start of the window BEFORE narrowing to float32.
+    #
+    # Absolute UTC epoch seconds (~1.79e9) have a float32 ULP of 128 s, so a
+    # whole 256 s window collapses to about three distinct values and every
+    # prediction lead to one. The time axis disappears: phi loses its t*omega
+    # term, the solve cannot fit, and every prediction comes out identical.
+    #
+    # Subtracting a common origin is exact in the model. phi = x*kx + y*ky -
+    # t*omega, so shifting t by t0 changes phi by -t0*omega, a constant per
+    # component that A absorbs. The origin MUST be shared by t1 and t2 or the
+    # prediction phases no longer line up with the fit.
+    t1 = np.asarray(t1, dtype=np.float64).reshape((-1, 1), order='F')
+    t2 = np.asarray(t2, dtype=np.float64).reshape((-1, 1), order='F')
+    t_origin = float(np.nanmin(t1)) if t1.size else 0.0
+    t1 = t1 - t_origin
+    t2 = t2 - t_origin
+
     work_dtype = np.float32
     x1 = np.asarray(x1, dtype=work_dtype).reshape((-1, 1), order='F')
     x2 = np.asarray(x2, dtype=work_dtype).reshape((-1, 1), order='F')
@@ -507,8 +523,8 @@ def leastSquaresWavePropagation(
     y2 = np.asarray(y2, dtype=work_dtype).reshape((-1, 1), order='F')
     kx = np.asarray(kx, dtype=work_dtype).reshape((-1, 1), order='F')
     ky = np.asarray(ky, dtype=work_dtype).reshape((-1, 1), order='F')
-    t1 = np.asarray(t1, dtype=work_dtype).reshape((-1, 1), order='F')
-    t2 = np.asarray(t2, dtype=work_dtype).reshape((-1, 1), order='F')
+    t1 = np.asarray(t1, dtype=work_dtype)
+    t2 = np.asarray(t2, dtype=work_dtype)
     omega = np.asarray(omega, dtype=work_dtype).reshape((-1, 1), order='F')
 
     # Reused velocity factors (avoid recomputing kx/sqrt(kx^2+ky^2) and ky/sqrt(...) many times).

@@ -230,9 +230,8 @@ def parseSbgMessage(
 # Subroutine for reading sbg data from a buffered TCP stream.
 #
 # `connection` is a blocking binary file object (sock.makefile('rb')), not a
-# raw socket: BufferedReader.read(n) returns exactly n bytes unless the stream
-# ends, so the old accumulate-one-byte-at-a-time loops are unnecessary and each
-# field costs one buffered read instead of n syscalls.
+# raw socket. BufferedReader.read(n) returns exactly n bytes unless the stream
+# ends, so each field costs one buffered read rather than n syscalls.
 def readSbgData_TCPIP(msgID, connection):
     if msgID in sbgMessages:
         msgLen = connection.read(2)

@@ -102,8 +102,7 @@ def solve_box_lbfgsb_jax(
     r = P @ x - b
     objective = 0.5 * float(r @ r)
     if print_losses:
-        # There is no regularization term, so the old `total=` and `data=`
-        # were always the same number; report the one value.
+        # The objective has no regularization term, so there is one value.
         print(f'JAX objective: {objective:.6e}', flush=True)
 
     class Result:

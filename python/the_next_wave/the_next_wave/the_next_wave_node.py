@@ -35,11 +35,13 @@ from .utilities import (
 @dataclass
 class TheNextWaveNodeParams:
     window_duration_sec: float = 256.0
-    # How stale the newest sample may be before a buoy stops counting as
-    # current. The window is anchored to wall clock, so this bounds how far
-    # behind `now` the solve input can be. Must stay well under the forecast
-    # lead times (1-14 s) or the prediction is already in the past on arrival.
-    window_max_lag_sec: float = 2.0
+    # The window ends at the newest moment every gating buoy has data for, and
+    # lags `now` by however long that takes to arrive. Lag does not reject a
+    # buoy -- the window just sits that far back. This caps how stale the whole
+    # window may be before solving is pointless: replayed backfill is
+    # contiguous and valid but can be an hour old, and a forecast 1-14 s ahead
+    # built on it is already long past.
+    window_max_lag_sec: float = 60.0
     processing_interval_sec: float = 0.5
     expected_fs: float = 5.0
     # Rotation applied in the lat/lon <-> local x/y projection (clockwise-positive).
@@ -389,7 +391,6 @@ class TheNextWaveNode(Interface):
         self.get_logger().info(
             f'window ready? {self.window_ready}'
             f' :: lag={self.window_max_lag_s:.1f}s'
-            f'/{self.params.window_max_lag_sec:.1f}s'
             f' :: overlap={self.window_overlap_s:.1f}s'
             f'/{self.params.window_duration_sec:.0f}s'
             f' :: {ref_name} n={len(stamps)} samples'
@@ -591,27 +592,65 @@ class TheNextWaveNode(Interface):
         """Return now in the same epoch as the SBG UTC timestamps."""
         return self.get_clock().now().nanoseconds / 1e3
 
+    def window_end_us(self) -> float:
+        """
+        Return the newest instant every gating buoy has data for.
+
+        This anchors the window: all buoys share one cutoff, so the usable
+        interval is [window_end - duration, window_end] for everyone. A buoy
+        that trails simply pulls the whole window back rather than being
+        dropped. NaN when any gating buoy has nothing yet.
+        """
+        lasts = []
+        for sid in self.window_ready_by_swift:
+            sbg = getattr(self.swifts, f'sbg{sid}', None)
+            ts = sbg.ShipMotion.time_stamp if sbg is not None else []
+            if not ts:
+                return float('nan')
+            lasts.append(ts[-1])
+        return float(min(lasts)) if lasts else float('nan')
+
+    def window_cutoff_us(self) -> float:
+        """Return the oldest timestamp the rolling window keeps."""
+        end_us = self.window_end_us()
+        if not np.isfinite(end_us):
+            return float('-inf')
+        return end_us - self.params.window_duration_sec * 1e6
+
     def update_window_ready(self) -> None:
         """
-        Update `window_ready` against the wall-clock window [now-duration, now].
+        Update `window_ready` for the window ending at `window_end_us()`.
 
-        Two conditions per gating buoy, both necessary:
+        Ready when both hold:
 
-        * span -- it holds at least window_duration_sec of data. Trimming is
-          anchored to wall clock, so this is data *within* the current window,
-          not merely 256 s of something.
-        * lag -- its newest sample is no older than window_max_lag_sec. A
-          forecast 1-14 s ahead of `now` is worthless if the data feeding it is
-          already further behind than the lead time, and a buoy that stops
-          delivering fails here as `now` advances past it.
+        * the oldest retained sample across buoys reaches back a full
+          window_duration_sec from window_end
+        * window_end lags `now` by no more than window_max_lag_sec
 
-        Overlap across buoys is implied: they share one wall-clock window, so
-        if each spans it and is current, they necessarily cover the same
-        interval. `window_overlap_s` is still computed, for the log.
+        Lag never rejects an individual buoy -- a slow one pulls the whole
+        window back. The cutoff only skips windows too stale to forecast from.
         """
-        firsts: list[float] = []
-        lasts: list[float] = []
-        now_s = self.now_epoch_us() / 1e6
+        end_us = self.window_end_us()
+        if not np.isfinite(end_us):
+            self.window_overlap_s = 0.0
+            self.window_max_lag_s = float('inf')
+            self.window_ready = False
+            return
+
+        end_s = end_us / 1e6
+        self.window_max_lag_s = (self.now_epoch_us() / 1e6) - end_s
+
+        firsts = []
+        for sid in self.window_ready_by_swift:
+            sbg = getattr(self.swifts, f'sbg{sid}', None)
+            ts = sbg.ShipMotion.time_stamp if sbg is not None else []
+            if len(ts) < 2:
+                self.window_overlap_s = 0.0
+                self.window_ready = False
+                return
+            firsts.append(ts[0] / 1e6)
+
+        self.window_overlap_s = max(0.0, end_s - max(firsts))
 
         fs_ready = (
             self.params.downsample_to_hz
@@ -620,35 +659,10 @@ class TheNextWaveNode(Interface):
         )
         epsilon_s = (1.0 / fs_ready) if fs_ready and fs_ready > 0.0 else 0.0
 
-        ready = bool(self.window_ready_by_swift)
-        self.window_max_lag_s = 0.0
-
-        for sid in self.window_ready_by_swift:
-            sbg = getattr(self.swifts, f'sbg{sid}', None)
-            ts = sbg.ShipMotion.time_stamp if sbg is not None else []
-            if len(ts) < 2:
-                self.window_overlap_s = 0.0
-                self.window_max_lag_s = float('inf')
-                self.window_ready = False
-                return
-
-            first_s = ts[0] / 1e6
-            last_s = ts[-1] / 1e6
-            firsts.append(first_s)
-            lasts.append(last_s)
-
-            lag_s = now_s - last_s
-            self.window_max_lag_s = max(self.window_max_lag_s, lag_s)
-
-            if (last_s - first_s) < (self.params.window_duration_sec - epsilon_s):
-                ready = False
-            if lag_s > self.params.window_max_lag_sec:
-                ready = False
-
-        self.window_overlap_s = (
-            max(0.0, min(lasts) - max(firsts)) if firsts else 0.0
+        self.window_ready = (
+            self.window_overlap_s >= (self.params.window_duration_sec - epsilon_s)
+            and self.window_max_lag_s <= self.params.window_max_lag_sec
         )
-        self.window_ready = ready
 
     def validate_swift_roles(self, params: 'TheNextWaveNodeParams') -> None:
         """
@@ -1432,42 +1446,17 @@ class TheNextWaveNode(Interface):
         self.last_accept_t_us_by_swift.pop(swift_num, None)
 
     def maintain_sbg_window(self, sbg: SBGData, current_t_us: float, swift_num: int):
-        # The window is anchored to WALL CLOCK, not to this buoy's newest
-        # sample: [now - window_duration, now].
-        #
-        # The product is a 1-14 s forecast from *now*, so a window that is a
-        # valid 256 s but sits in the past is useless however well the buoys
-        # agree with each other. Anchoring here also means every buoy shares
-        # one window, so their intersection no longer drifts with arrival
-        # jitter, and replayed backfill simply falls outside the window instead
-        # of needing its own detection.
-        #
-        # Trimming keeps `window_max_lag_sec` of slack beyond the window so a
-        # buoy whose newest sample lags by up to that much can still hold a
-        # full window_duration_sec span.
-        #
-        # SBG timestamps are GPS-derived UTC and the host is disciplined by
-        # chrony, so the two clocks are directly comparable. Samples arriving
-        # before the SBG resolves UTC are rejected at ingest by the bridge, so
-        # they never reach this comparison.
-        now_us = self.now_epoch_us()
-        window_us = (
-            self.params.window_duration_sec + self.params.window_max_lag_sec
-        ) * 1e6
-        cutoff_t_us = now_us - window_us
+        # One cutoff for every buoy: window_end - window_duration, where
+        # window_end is the newest instant they all have data for. A trailing
+        # buoy pulls the whole window back rather than being trimmed away.
+        cutoff_t_us = self.window_cutoff_us()
 
         # Deque-based rolling window: pop from the left until we're within cutoff.
         # Assumes timestamps are monotonic; we reset the window on detected time jumps.
         try:
-            # Pop strictly: every retained sample lies inside the window.
-            #
-            # This previously kept one sample just *before* the cutoff so the
-            # span would round up to >= window_duration_sec rather than falling
-            # a sample period short. That compensation is unnecessary -- the
-            # readiness checks already allow `ready_epsilon_s` (one sample
-            # period) of slack -- and it was actively harmful: after a time
-            # jump the retained straggler could sit an hour outside the window,
-            # making a 2-sample deque report a 3000 s span and pass readiness.
+            # Strict: every retained sample lies inside the window. Keeping
+            # any sample from before the cutoff would let a stale straggler
+            # inflate the measured span.
             while (
                 sbg.ShipMotion.time_stamp
                 and sbg.ShipMotion.time_stamp[0] < cutoff_t_us
@@ -1684,7 +1673,9 @@ class TheNextWaveNode(Interface):
         params.processing_interval_sec = float(
             self.get_parameter('processing_interval_sec').value
         )
-        params.window_max_lag_sec = float(self.get_parameter('window_max_lag_sec').value)
+        params.window_max_lag_sec = float(
+            self.get_parameter('window_max_lag_sec').value
+        )
         params.downsample_to_hz = float(self.get_parameter('downsample_to_hz').value)
 
         params.rotation_deg = float(self.get_parameter('rotation_deg').value)
