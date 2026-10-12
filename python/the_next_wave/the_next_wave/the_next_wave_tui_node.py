@@ -537,9 +537,13 @@ def main(args=None):
         # add_node returns False if the node already belongs to an executor,
         # in which case spin_once here services nothing. timers/subscriptions
         # say whether the entities exist on the node at all.
+        # Node.timers / Node.subscriptions are generators on Humble and lists
+        # on Jazzy, so count them without assuming either.
+        n_timers = sum(1 for _ in node.timers)
+        n_subs = sum(1 for _ in node.subscriptions)
         print(f'[tui] headless; add_node={added} '
               f'owned={node.executor is executor} '
-              f'timers={len(node.timers)} subs={len(node.subscriptions)} '
+              f'timers={n_timers} subs={n_subs} '
               f'topics={[s.topic_name for s in node.subs_]}', flush=True)
         try:
             while rclpy.ok():
