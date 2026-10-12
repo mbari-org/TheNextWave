@@ -20,8 +20,8 @@ from buoy_api.interface import Interface
 from buoy_interfaces.msg import WavePredictionOutput, WavePredictionPoint
 from buoy_interfaces.msg import XBRecord
 import numpy as np
-from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 import rclpy
+from rclpy.parameter import Parameter
 from std_msgs.msg import Header
 
 from . import TheNextWave, TheNextWaveConfig
@@ -1686,21 +1686,21 @@ class TheNextWaveNode(Interface):
         # Local frame origin and extra forecast locations.
         self.declare_parameter('lat_origin', defaults.lat_origin)
         self.declare_parameter('lon_origin', defaults.lon_origin)
-        # These default to empty, and rclpy cannot infer a parameter type from
-        # an empty list, so each needs an explicit typed descriptor.
-        str_array = ParameterDescriptor(type=ParameterType.PARAMETER_STRING_ARRAY)
-        dbl_array = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
-        for name, default, descriptor in (
-            ('prediction_points.latlon_names',
-             defaults.prediction_point_latlon_names, str_array),
-            ('prediction_points.lats', defaults.prediction_point_lats, dbl_array),
-            ('prediction_points.lons', defaults.prediction_point_lons, dbl_array),
-            ('prediction_points.xy_names',
-             defaults.prediction_point_xy_names, str_array),
-            ('prediction_points.xs', defaults.prediction_point_xs, dbl_array),
-            ('prediction_points.ys', defaults.prediction_point_ys, dbl_array),
+        # Declared by type with no default. rclpy infers a parameter's type
+        # from its default value and ignores the type in any descriptor passed
+        # alongside it, so an empty-list default would infer BYTE_ARRAY and
+        # then reject the configured strings and floats. Passing the type
+        # itself declares these statically typed and unset; the read-back below
+        # turns the unset None back into an empty list.
+        for name, param_type in (
+            ('prediction_points.latlon_names', Parameter.Type.STRING_ARRAY),
+            ('prediction_points.lats', Parameter.Type.DOUBLE_ARRAY),
+            ('prediction_points.lons', Parameter.Type.DOUBLE_ARRAY),
+            ('prediction_points.xy_names', Parameter.Type.STRING_ARRAY),
+            ('prediction_points.xs', Parameter.Type.DOUBLE_ARRAY),
+            ('prediction_points.ys', Parameter.Type.DOUBLE_ARRAY),
         ):
-            self.declare_parameter(name, default, descriptor)
+            self.declare_parameter(name, param_type)
 
         # Buoy roles: which SWIFTs are inverted, which is held out for scoring.
         self.declare_parameter('solve_swifts', defaults.solve_swifts)
