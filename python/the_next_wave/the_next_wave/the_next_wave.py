@@ -40,6 +40,22 @@ class TheNextWaveConfig:
     # configured buoys; 3 and 4 are the supported sizes.
     solve_swifts: tuple[str, ...] = ('swift22', 'swift23', 'swift24', 'swift25')
 
+    # Fixed origin of the local x/y frame, as in the MATLAB, where it is a
+    # user-declared site reference. When None the origin is latched from the
+    # first solve SWIFT's first GPS fix, which makes x/y differ between runs
+    # and depend on which buoy connected first. Set it to make x/y reproducible
+    # -- required for prediction points given in local coordinates.
+    lat_origin: float | None = None
+    lon_origin: float | None = None
+
+    # Extra locations to forecast at, alongside the WEC target. Either form may
+    # be used; both are evaluated at the same lead times, costing one matvec
+    # and no extra solve.
+    #   latlon: (name, lat, lon) -- projected with the same origin and rotation
+    #   xy:     (name, x, y) in local metres -- needs lat_origin/lon_origin set
+    prediction_points_latlon: tuple[tuple[str, float, float], ...] = ()
+    prediction_points_xy: tuple[tuple[str, float, float], ...] = ()
+
     # Optional SWIFT held out of the inversion and used only to score
     # forecasts. Because it never enters the solve, its residual is genuinely
     # out of sample -- the cheap form of leave-one-out, costing one extra
@@ -103,8 +119,10 @@ class TheNextWave:
         self.logger = logger
 
         self.A0: np.ndarray | None = None
-        self.lat_origin: float | None = None
-        self.lon_origin: float | None = None
+        # A configured origin wins and is never overwritten by the latch in
+        # stack_measurement_data, which only fires while these are None.
+        self.lat_origin: float | None = self.config.lat_origin
+        self.lon_origin: float | None = self.config.lon_origin
         self.last_wavespec: WaveSpec | None = None
         self.last_wavespec_time_s: float | None = None
         self.profiling_iter: int = 0
@@ -368,9 +386,14 @@ class TheNextWave:
                 x_buoys = np.array([], dtype=float)
                 y_buoys = np.array([], dtype=float)
 
-        pred_loc_x = np.concatenate(([float(x_target)], x_buoys))
-        pred_loc_y = np.concatenate(([float(y_target)], y_buoys))
+        point_names, point_x, point_y = self.resolve_prediction_points()
+
+        # Location order is fixed and mirrored by the result arrays:
+        # [target, *solve/verification buoys, *configured points].
+        pred_loc_x = np.concatenate(([float(x_target)], x_buoys, point_x))
+        pred_loc_y = np.concatenate(([float(y_target)], y_buoys, point_y))
         n_pred_loc = int(pred_loc_x.size)
+        n_buoy_loc = int(x_buoys.size)
 
         # Location-major: [loc0 @ all leads, loc1 @ all leads, ...]
         tpred = np.tile(t_lead, n_pred_loc)
@@ -425,9 +448,14 @@ class TheNextWave:
         uout = u_by_loc[0, :]
         vout = v_by_loc[0, :]
 
-        buoy_pred_z = z_by_loc[1:, :]
-        buoy_pred_u = u_by_loc[1:, :]
-        buoy_pred_v = v_by_loc[1:, :]
+        b_end = 1 + n_buoy_loc
+        buoy_pred_z = z_by_loc[1:b_end, :]
+        buoy_pred_u = u_by_loc[1:b_end, :]
+        buoy_pred_v = v_by_loc[1:b_end, :]
+
+        point_pred_z = z_by_loc[b_end:, :]
+        point_pred_u = u_by_loc[b_end:, :]
+        point_pred_v = v_by_loc[b_end:, :]
 
         # Dense model evaluation at the target (WEC).
         # When disabled, do not apply the solved model to any history/time series.
@@ -549,11 +577,18 @@ class TheNextWave:
                 # Forecasts at the buoy locations, shape (n_scored, n_lead),
                 # sharing `t_pred`. Column order is `buoy_pred_labels`: the
                 # solve buoys first, then the verification buoy if configured.
-                'buoy_pred_x': pred_loc_x[1:],
-                'buoy_pred_y': pred_loc_y[1:],
+                'buoy_pred_x': pred_loc_x[1:b_end],
+                'buoy_pred_y': pred_loc_y[1:b_end],
                 'buoy_pred_z': buoy_pred_z,
                 'buoy_pred_u': buoy_pred_u,
                 'buoy_pred_v': buoy_pred_v,
+                # Configured extra locations, same lead times as the target.
+                'point_pred_labels': list(point_names),
+                'point_pred_x': pred_loc_x[b_end:],
+                'point_pred_y': pred_loc_y[b_end:],
+                'point_pred_z': point_pred_z,
+                'point_pred_u': point_pred_u,
+                'point_pred_v': point_pred_v,
                 'buoy_pred_labels': list(scored_names),
                 'solve_swifts': list(solve_names),
                 # Index of the held-out buoy within the arrays above, or -1.
@@ -635,6 +670,51 @@ class TheNextWave:
                 )
 
         return results
+
+    def resolve_prediction_points(self) -> tuple[list[str], np.ndarray, np.ndarray]:
+        """
+        Return (names, x, y) for the configured extra prediction points.
+
+        lat/lon points are projected with the same origin and rotation as the
+        buoys. x/y points are taken as given, and are only meaningful against a
+        configured `lat_origin`/`lon_origin` -- without one the frame is
+        latched from whichever SWIFT connected first and shifts between runs,
+        so they are refused rather than silently placed somewhere else.
+        """
+        names: list[str] = []
+        xs: list[float] = []
+        ys: list[float] = []
+
+        for name, lat, lon in self.config.prediction_points_latlon:
+            if self.lat_origin is None or self.lon_origin is None:
+                continue
+            px, py = generic_coordinate_transform(
+                float(lat), float(lon),
+                self.lat_origin, self.lon_origin, self.config.rotation_deg,
+            )
+            names.append(str(name))
+            xs.append(float(np.asarray(px).reshape(-1)[0]))
+            ys.append(float(np.asarray(py).reshape(-1)[0]))
+
+        if self.config.prediction_points_xy:
+            if self.config.lat_origin is None or self.config.lon_origin is None:
+                if self.logger is not None:
+                    self.logger.warn(
+                        'ignoring prediction_points given in x/y: they need an '
+                        'explicit lat_origin/lon_origin, otherwise the frame '
+                        'moves between runs'
+                    )
+            else:
+                for name, px, py in self.config.prediction_points_xy:
+                    names.append(str(name))
+                    xs.append(float(px))
+                    ys.append(float(py))
+
+        return (
+            names,
+            np.asarray(xs, dtype=float),
+            np.asarray(ys, dtype=float),
+        )
 
     def resolve_swift_sets(self, cleaned_sbg: SWIFTArray) -> tuple[list[str], list[str]]:
         """

@@ -20,6 +20,7 @@ from buoy_api.interface import Interface
 from buoy_interfaces.msg import WavePredictionOutput, WavePredictionPoint
 from buoy_interfaces.msg import XBRecord
 import numpy as np
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 import rclpy
 from std_msgs.msg import Header
 
@@ -101,6 +102,20 @@ class TheNextWaveNodeParams:
     publish_reconstruction: bool = True
     publish_buoy_predictions: bool = True
     publish_wec_series: bool = True
+
+    # Fixed origin of the local x/y frame. NaN leaves it latched from the first
+    # solve SWIFT's first GPS fix, which varies between runs.
+    lat_origin: float = float('nan')
+    lon_origin: float = float('nan')
+
+    # Extra forecast locations beside the WEC target, in either coordinate
+    # form. Parallel arrays because ROS parameters have no list-of-dict type.
+    prediction_point_latlon_names: list[str] = field(default_factory=list)
+    prediction_point_lats: list[float] = field(default_factory=list)
+    prediction_point_lons: list[float] = field(default_factory=list)
+    prediction_point_xy_names: list[str] = field(default_factory=list)
+    prediction_point_xs: list[float] = field(default_factory=list)
+    prediction_point_ys: list[float] = field(default_factory=list)
 
     # Which SWIFTs feed the inversion, and which (if any) is held out purely to
     # score forecasts against data the solve never saw.
@@ -262,6 +277,24 @@ class TheNextWaveNode(Interface):
         self.predictor = TheNextWave(
             config=TheNextWaveConfig(
                 expected_fs=self.params.expected_fs,
+                lat_origin=(
+                    self.params.lat_origin
+                    if np.isfinite(self.params.lat_origin) else None
+                ),
+                lon_origin=(
+                    self.params.lon_origin
+                    if np.isfinite(self.params.lon_origin) else None
+                ),
+                prediction_points_latlon=tuple(zip(
+                    self.params.prediction_point_latlon_names,
+                    self.params.prediction_point_lats,
+                    self.params.prediction_point_lons,
+                )),
+                prediction_points_xy=tuple(zip(
+                    self.params.prediction_point_xy_names,
+                    self.params.prediction_point_xs,
+                    self.params.prediction_point_ys,
+                )),
                 solve_swifts=tuple(self.params.solve_swifts),
                 verification_swift=self.params.verification_swift,
                 forecast_skill_enable=self.params.forecast_skill_enable,
@@ -664,6 +697,45 @@ class TheNextWaveNode(Interface):
             and self.window_max_lag_s <= self.params.window_max_lag_sec
         )
 
+    def validate_prediction_points(self, params: 'TheNextWaveNodeParams') -> None:
+        """
+        Check the prediction-point arrays line up and raise on a bad set.
+
+        A mismatched name/coordinate list would silently forecast at the wrong
+        place, so it fails at startup instead.
+        """
+        for label, names, a, b, a_name, b_name in (
+            ('lat/lon', params.prediction_point_latlon_names,
+             params.prediction_point_lats, params.prediction_point_lons, 'lats', 'lons'),
+            ('x/y', params.prediction_point_xy_names,
+             params.prediction_point_xs, params.prediction_point_ys, 'xs', 'ys'),
+        ):
+            if not (len(names) == len(a) == len(b)):
+                raise ValueError(
+                    f'prediction_points {label} arrays must be the same length: '
+                    f'names={len(names)} {a_name}={len(a)} {b_name}={len(b)}'
+                )
+
+        has_origin = np.isfinite(params.lat_origin) and np.isfinite(params.lon_origin)
+        if params.prediction_point_xy_names and not has_origin:
+            raise ValueError(
+                'prediction_points given in x/y require an explicit lat_origin and '
+                'lon_origin; without one the local frame is latched from whichever '
+                'SWIFT connects first and moves between runs'
+            )
+
+        n_pts = len(params.prediction_point_latlon_names) + len(
+            params.prediction_point_xy_names
+        )
+        if n_pts or has_origin:
+            origin = (
+                f'({params.lat_origin:.6f}, {params.lon_origin:.6f})'
+                if has_origin else 'latched from first SWIFT fix'
+            )
+            self.get_logger().info(
+                f'Local frame origin: {origin}; {n_pts} extra prediction point(s)'
+            )
+
     def validate_swift_roles(self, params: 'TheNextWaveNodeParams') -> None:
         """
         Check solve_swifts / verification_swift and raise on a bad combination.
@@ -880,6 +952,54 @@ class TheNextWaveNode(Interface):
                 p.vel_east = float(bu[j, i]) if bu.shape == bz.shape else 0.0
                 p.vel_north = float(bv[j, i]) if bv.shape == bz.shape else 0.0
                 msg.buoy_predictions.append(p)
+
+    def pack_point_predictions(self, msg, results: dict, t_pred: np.ndarray) -> None:
+        """
+        Attach forecasts at the extra locations named in config.
+
+        Ordered point-major (point 0 at every lead, then point 1, ...), same
+        convention as buoy_predictions. These are products rather than
+        diagnostics, so they are published regardless of the skill settings.
+        """
+        lat0 = results.get('lat_origin')
+        lon0 = results.get('lon_origin')
+        msg.local_origin_lat = float('nan') if lat0 is None else float(lat0)
+        msg.local_origin_lon = float('nan') if lon0 is None else float(lon0)
+
+        pz = np.asarray(results.get('point_pred_z', []), dtype=float)
+        pu = np.asarray(results.get('point_pred_u', []), dtype=float)
+        pv = np.asarray(results.get('point_pred_v', []), dtype=float)
+        px = np.asarray(results.get('point_pred_x', []), dtype=float).reshape((-1,))
+        py = np.asarray(results.get('point_pred_y', []), dtype=float).reshape((-1,))
+
+        if pz.ndim != 2 or pz.size == 0 or px.size != pz.shape[0]:
+            msg.n_prediction_points = 0
+            msg.n_prediction_point_leads = 0
+            msg.point_prediction_labels = []
+            return
+
+        n_p, n_lead = pz.shape
+        n_lead = min(n_lead, int(t_pred.size))
+        msg.n_prediction_points = int(n_p)
+        msg.n_prediction_point_leads = int(n_lead)
+        msg.point_prediction_labels = [
+            str(s) for s in results.get('point_pred_labels', [])
+        ][:n_p]
+
+        for j in range(n_p):
+            for i in range(n_lead):
+                p = WavePredictionPoint()
+                t_s = float(t_pred[i])
+                p.header = Header(
+                    frame_id='wec_buoy', stamp=self.seconds_to_time_msg(t_s)
+                )
+                p.time = t_s
+                p.x = float(px[j])
+                p.y = float(py[j])
+                p.elevation = float(pz[j, i])
+                p.vel_east = float(pu[j, i]) if pu.shape == pz.shape else 0.0
+                p.vel_north = float(pv[j, i]) if pv.shape == pz.shape else 0.0
+                msg.point_predictions.append(p)
 
     def publish_prediction(self, results: dict) -> None:
         wavespec = results.get('wavespec')
@@ -1117,6 +1237,7 @@ class TheNextWaveNode(Interface):
             msg.predictions.append(pred_point)
 
         self.pack_buoy_predictions(msg, results, t_pred)
+        self.pack_point_predictions(msg, results, t_pred)
 
         # Score matured forecasts, buffer this window's, publish rolling skill.
         if self.params.forecast_skill_enable:
@@ -1562,6 +1683,25 @@ class TheNextWaveNode(Interface):
         self.declare_parameter('publish_buoy_predictions', defaults.publish_buoy_predictions)
         self.declare_parameter('publish_wec_series', defaults.publish_wec_series)
 
+        # Local frame origin and extra forecast locations.
+        self.declare_parameter('lat_origin', defaults.lat_origin)
+        self.declare_parameter('lon_origin', defaults.lon_origin)
+        # These default to empty, and rclpy cannot infer a parameter type from
+        # an empty list, so each needs an explicit typed descriptor.
+        str_array = ParameterDescriptor(type=ParameterType.PARAMETER_STRING_ARRAY)
+        dbl_array = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
+        for name, default, descriptor in (
+            ('prediction_points.latlon_names',
+             defaults.prediction_point_latlon_names, str_array),
+            ('prediction_points.lats', defaults.prediction_point_lats, dbl_array),
+            ('prediction_points.lons', defaults.prediction_point_lons, dbl_array),
+            ('prediction_points.xy_names',
+             defaults.prediction_point_xy_names, str_array),
+            ('prediction_points.xs', defaults.prediction_point_xs, dbl_array),
+            ('prediction_points.ys', defaults.prediction_point_ys, dbl_array),
+        ):
+            self.declare_parameter(name, default, descriptor)
+
         # Buoy roles: which SWIFTs are inverted, which is held out for scoring.
         self.declare_parameter('solve_swifts', defaults.solve_swifts)
         self.declare_parameter('verification_swift', defaults.verification_swift)
@@ -1696,6 +1836,28 @@ class TheNextWaveNode(Interface):
             self.get_parameter('publish_buoy_predictions').value
         )
         params.publish_wec_series = bool(self.get_parameter('publish_wec_series').value)
+
+        params.lat_origin = float(self.get_parameter('lat_origin').value)
+        params.lon_origin = float(self.get_parameter('lon_origin').value)
+        params.prediction_point_latlon_names = [
+            str(s) for s in (self.get_parameter('prediction_points.latlon_names').value or [])
+        ]
+        params.prediction_point_lats = [
+            float(v) for v in (self.get_parameter('prediction_points.lats').value or [])
+        ]
+        params.prediction_point_lons = [
+            float(v) for v in (self.get_parameter('prediction_points.lons').value or [])
+        ]
+        params.prediction_point_xy_names = [
+            str(s) for s in (self.get_parameter('prediction_points.xy_names').value or [])
+        ]
+        params.prediction_point_xs = [
+            float(v) for v in (self.get_parameter('prediction_points.xs').value or [])
+        ]
+        params.prediction_point_ys = [
+            float(v) for v in (self.get_parameter('prediction_points.ys').value or [])
+        ]
+        self.validate_prediction_points(params)
 
         params.solve_swifts = [
             str(s).strip()

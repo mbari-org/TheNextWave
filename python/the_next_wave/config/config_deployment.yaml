@@ -62,6 +62,25 @@
     mem_moment_cap_enable: false
     mem_moment_cap: 0.999
 
+    # Origin of the local x/y frame every coordinate in /wave_predictions is
+    # measured from. Leave both out to latch it from the first solve SWIFT's
+    # first GPS fix, which moves the frame between runs; set it to compare x/y
+    # across runs, and required if any prediction point is given in x/y.
+    # lat_origin: 36.7500
+    # lon_origin: -122.0250
+
+    # Extra forecast locations beside the WEC. Evaluated from the same solved
+    # model at the same lead times, so each costs one matvec and no extra solve.
+    # Parallel arrays: ROS parameters have no list-of-dict type. Left out
+    # entirely rather than set to [], which the ROS yaml parser cannot type.
+    # prediction_points:
+    #   latlon_names: ['mooring', 'shelf_break']
+    #   lats: [36.7512, 36.7604]
+    #   lons: [-122.0261, -122.0388]
+    #   xy_names: ['grid_ne']
+    #   xs: [250.0]
+    #   ys: [250.0]
+
     # In production, mbari wec target lat/lon should come from the AHRS topic.
     # Keep example frame override off unless intentionally running without AHRS.
     sbg_bridge_use_example_frame: false
