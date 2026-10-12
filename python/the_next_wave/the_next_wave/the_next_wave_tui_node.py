@@ -144,12 +144,14 @@ class TheNextWaveTuiNode(Interface):
         self.declare_parameter('refresh_hz', 4.0)
         self.declare_parameter('plot_theme', 'pro')
         self.declare_parameter('plot_marker', 'braille')
+        self.declare_parameter('headless', False)
 
         self.buoy_index = int(self.get_parameter('buoy_index').value)
         self.history_sec = float(self.get_parameter('history_sec').value)
         self.refresh_hz = float(self.get_parameter('refresh_hz').value)
         self.plot_theme = str(self.get_parameter('plot_theme').value)
         self.plot_marker = str(self.get_parameter('plot_marker').value)
+        self.headless = bool(self.get_parameter('headless').value)
         if not np.isfinite(self.history_sec) or self.history_sec <= 0.0:
             self.history_sec = 60.0
         if not np.isfinite(self.refresh_hz) or self.refresh_hz <= 0.0:
@@ -514,6 +516,31 @@ def main(args=None):
     executor.add_node(node)
 
     period = 1.0 / node.refresh_hz
+
+    if node.headless:
+        # Same executor, same loop, no rich. If ticks climb here but not in the
+        # TUI, the display layer is at fault; if they stay at zero in both, it
+        # never was.
+        print(f'[tui] headless; subscribed to '
+              f'{[s.topic_name for s in node.subs_]}', flush=True)
+        try:
+            while rclpy.ok():
+                deadline = time.monotonic() + period
+                while rclpy.ok() and time.monotonic() < deadline:
+                    executor.spin_once(timeout_sec=period / 4.0)
+                print(f'[tui] ticks={node.n_ticks} msgs={node.n_received} '
+                      f'pubs={node.count_publishers("/wave_predictions")}',
+                      flush=True)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            executor.remove_node(node)
+            executor.shutdown()
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        return
+
     console = Console()
     try:
         with Live(node.render(), console=console, screen=True,
