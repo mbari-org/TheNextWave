@@ -24,6 +24,8 @@ panels say which flag to turn on rather than drawing an empty axis.
 from __future__ import annotations
 
 from collections import deque
+import os
+import sys
 import threading
 import time
 import traceback
@@ -151,7 +153,12 @@ class TheNextWaveTuiNode(Interface):
         self.refresh_hz = float(self.get_parameter('refresh_hz').value)
         self.plot_theme = str(self.get_parameter('plot_theme').value)
         self.plot_marker = str(self.get_parameter('plot_marker').value)
-        self.headless = bool(self.get_parameter('headless').value)
+        # Env var as well as the ROS parameter: a parameter is only useful if
+        # overrides actually reach this node, which is itself in question.
+        self.headless = (
+            bool(self.get_parameter('headless').value)
+            or os.environ.get('TNW_HEADLESS', '') not in ('', '0', 'false', 'False')
+        )
         if not np.isfinite(self.history_sec) or self.history_sec <= 0.0:
             self.history_sec = 60.0
         if not np.isfinite(self.refresh_hz) or self.refresh_hz <= 0.0:
@@ -504,6 +511,12 @@ class TheNextWaveTuiNode(Interface):
 
 
 def main(args=None):
+    # Unconditional, before anything can swallow it: says which file is really
+    # running and what it was told, without depending on ROS parameters.
+    print(f'[tui] module={__file__} argv={sys.argv} '
+          f'TNW_HEADLESS={os.environ.get("TNW_HEADLESS", "")!r}',
+          file=sys.stderr, flush=True)
+
     rclpy.init(args=args)
     node = TheNextWaveTuiNode()
 
