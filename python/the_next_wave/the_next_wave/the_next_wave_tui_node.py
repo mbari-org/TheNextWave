@@ -25,10 +25,13 @@ from __future__ import annotations
 
 from collections import deque
 import os
+import select
 import sys
+import termios
 import threading
 import time
 import traceback
+import tty
 from typing import Callable, Optional
 
 from buoy_api.interface import Interface
@@ -110,6 +113,49 @@ def fmt(value: float, spec: str = '7.3f') -> str:
     return '--' if value is None or not np.isfinite(value) else format(value, spec)
 
 
+class RawKeys:
+    """
+    Read single keypresses without waiting for Enter, restoring the terminal.
+
+    cbreak rather than raw mode, so Ctrl-C still raises KeyboardInterrupt. A
+    non-tty stdin (piped or redirected) degrades to never reporting a key
+    instead of failing.
+    """
+
+    def __init__(self) -> None:
+        self.fd: Optional[int] = None
+        self.saved = None
+
+    def __enter__(self) -> 'RawKeys':
+        try:
+            if sys.stdin is not None and sys.stdin.isatty():
+                self.fd = sys.stdin.fileno()
+                self.saved = termios.tcgetattr(self.fd)
+                tty.setcbreak(self.fd)
+        except Exception:
+            self.fd = None
+            self.saved = None
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self.fd is not None and self.saved is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+            except Exception:
+                pass
+        return False
+
+    def key(self) -> str:
+        """Return a pending keypress, or '' if none is waiting."""
+        if self.fd is None:
+            return ''
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            return sys.stdin.read(1) if ready else ''
+        except Exception:
+            return ''
+
+
 class PlotextView:
     """
     A rich renderable that redraws a plotext figure at the size rich gives it.
@@ -174,11 +220,20 @@ class TheNextWaveTuiNode(Interface):
         # rather than a series (`publish_wec_series: false`).
         self.wec_hist: deque = deque()
 
+        # Past buoy forecasts at the scored lead, (target_time, z per buoy).
+        self.fc_hist: deque = deque()
+        self.fc_lead_sec = float('nan')
+
         self.ensure_prediction_subscription()
 
         # Proof that the executor is actually servicing this node's callbacks.
         # Without it, "no messages" is ambiguous between a dead spin thread and
         # endpoints that never matched.
+        # Set from each decoded message so the key handler knows how far the
+        # buoy selection may wrap before any message has been plotted.
+        self.n_buoys = 0
+        self.quit = False
+
         self.n_ticks = 0
         self.tick_timer = self.create_timer(
             1.0, self.tick_callback, callback_group=self.cb_sub,
@@ -186,6 +241,20 @@ class TheNextWaveTuiNode(Interface):
 
     def tick_callback(self) -> None:
         self.n_ticks += 1
+
+    def handle_key(self, k: str) -> None:
+        """Apply a keypress: switch the plotted buoy, or quit."""
+        n_b = max(1, self.n_buoys)
+        if k in ('q', 'Q'):
+            self.quit = True
+        elif k in ('n', 'N', ' ', '\t'):
+            self.buoy_index = (self.buoy_index + 1) % n_b
+        elif k in ('p', 'P'):
+            self.buoy_index = (self.buoy_index - 1) % n_b
+        elif k.isdigit() and k != '0':
+            i = int(k) - 1
+            if i < n_b:
+                self.buoy_index = i
 
     def ensure_prediction_subscription(self) -> None:
         """
@@ -226,9 +295,44 @@ class TheNextWaveTuiNode(Interface):
                 self.n_received += 1
                 self.last_rx_wall = self.now_wall()
                 self.last_error = ''
+                self.buffer_forecast(data)
         except Exception:
             with self.lock:
                 self.last_error = traceback.format_exc()
+
+    def buffer_forecast(self, msg: WavePredictionOutput) -> None:
+        """
+        Keep each window's buoy forecast at the scored lead, by target time.
+
+        This is the raw material of forecast_skill: a forecast made at one
+        window for an instant that later arrives as a measurement. Buffering it
+        here lets the buoy plot draw forecast against measurement on one axis,
+        which is the same comparison the skill number sums over. Buffered under
+        the caller's lock, once per message.
+        """
+        n_b = int(msg.n_buoy_prediction_buoys)
+        n_lead = int(msg.n_buoy_prediction_leads)
+        pts = msg.buoy_predictions
+        if n_b <= 0 or n_lead <= 0 or len(pts) < n_b * n_lead:
+            return
+
+        # Location-major: buoy 0 at every lead, then buoy 1, ...
+        fz = np.array([p.elevation for p in pts[:n_b * n_lead]],
+                      dtype=float).reshape((n_b, n_lead))
+        ft = np.array([p.time for p in pts[:n_b * n_lead]],
+                      dtype=float).reshape((n_b, n_lead))
+
+        lead = float(msg.forecast_skill_lead_sec)
+        if not np.isfinite(lead) or lead <= 0.0:
+            lead = 1.0
+        leads = ft[0, :] - float(msg.window_end_time)
+        i = int(np.argmin(np.abs(leads - lead)))
+        self.fc_lead_sec = float(leads[i])
+
+        self.fc_hist.append((float(ft[0, i]), fz[:, i].copy()))
+        cutoff = float(msg.window_end_time) - self.history_sec
+        while self.fc_hist and self.fc_hist[0][0] < cutoff:
+            self.fc_hist.popleft()
 
     def now_wall(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -440,7 +544,21 @@ class TheNextWaveTuiNode(Interface):
             plt.plot(list(tr[:nr]), list(z_recon[:nr, b]),
                      label='reconstruction', marker=self.plot_marker, color='orange')
 
-        plt.title(f'{name}: measured vs reconstruction  (t - window_end, s)')
+        # Past forecasts for this buoy, each plotted at the instant it was made
+        # for, against the measurement that has since arrived there. Agreement
+        # here is what a positive forecast_skill claims; disagreement while the
+        # reconstruction tracks puts the fault in the forecast, not the fit.
+        fc = [(t, z[b]) for t, z in self.fc_hist if b < z.size]
+        title = f'{name}: measured vs reconstruction'
+        if fc:
+            plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
+                        label=f'forecast +{self.fc_lead_sec:.0f}s',
+                        marker='hd', color='green')
+            title += f' vs +{self.fc_lead_sec:.0f}s forecast'
+        elif not self.fc_hist:
+            title += '  (forecast overlay needs publish_buoy_predictions)'
+
+        plt.title(f'{title}  (t - window_end, s)')
         plt.xlabel('s')
         plt.ylabel('m')
         return plt.build()
@@ -491,9 +609,18 @@ class TheNextWaveTuiNode(Interface):
 
         n_b = max(d['z_meas'].shape[1] if d['z_meas'].ndim == 2 else 0,
                   len(msg.forecast_skill_by_buoy))
+
+        # Table chrome is 4 lines (top border, header, header rule, bottom
+        # border) and the Panel adds 2 more, plus one line for the hint shown
+        # when the reconstruction columns are unavailable. Undercounting here
+        # silently crops the last buoys off the bottom.
+        have_recon = bool(d['z_meas'].size and d['z_recon'].size)
+        stats_size = n_b + 6 + (0 if have_recon else 1)
+        self.n_buoys = n_b
+
         root.split_column(
             Layout(name='head', size=9),
-            Layout(name='stats', size=n_b + 4),
+            Layout(name='stats', size=stats_size),
             Layout(name='buoy', ratio=1),
             Layout(name='wec', ratio=1),
         )
@@ -502,6 +629,8 @@ class TheNextWaveTuiNode(Interface):
         root['buoy'].update(Panel(
             PlotextView(lambda w, h: self.buoy_plot(d, w, h)),
             border_style='cyan',
+            subtitle='n/p next·prev buoy   1-9 select   q quit',
+            subtitle_align='right',
         ))
         root['wec'].update(Panel(
             PlotextView(lambda w, h: self.wec_plot(d, w, h)),
@@ -519,8 +648,8 @@ def check_plotext() -> None:
     ANSI string the rich panels decode. Without this check the first symptom is
     a traceback several frames deep inside rich's renderer.
     """
-    required = ('clf', 'plot_size', 'theme', 'plot', 'vertical_line',
-                'build', 'title', 'xlabel', 'ylabel')
+    required = ('clf', 'plot_size', 'theme', 'plot', 'scatter',
+                'vertical_line', 'build', 'title', 'xlabel', 'ylabel')
     missing = [n for n in required if not hasattr(plt, n)]
     if missing:
         raise SystemExit(
@@ -591,13 +720,18 @@ def main(args=None):
         # painted synchronously from this loop, so what is on screen is always
         # the frame this iteration built, and there is no second thread
         # contending for the console while the executor runs.
-        with Live(node.render(), console=console, screen=True,
-                  auto_refresh=False) as live:
-            while rclpy.ok():
-                # Service callbacks for one frame's worth of time, then redraw.
+        with RawKeys() as keys, Live(node.render(), console=console,
+                                     screen=True, auto_refresh=False) as live:
+            while rclpy.ok() and not node.quit:
+                # Service callbacks for one frame's worth of time, polling the
+                # keyboard between batches so a keypress lands within a frame
+                # rather than waiting out the whole budget.
                 deadline = time.monotonic() + period
                 while rclpy.ok() and time.monotonic() < deadline:
                     executor.spin_once(timeout_sec=period / 4.0)
+                    k = keys.key()
+                    if k:
+                        node.handle_key(k)
                 try:
                     frame = node.render()
                 except Exception:
