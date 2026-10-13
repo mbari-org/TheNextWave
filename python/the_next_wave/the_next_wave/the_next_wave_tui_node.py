@@ -254,7 +254,7 @@ class TheNextWaveTuiNode(Interface):
         elif k in ('p', 'P'):
             self.buoy_index = (self.buoy_index - 1) % n_b
         elif k in ('c', 'C'):
-            chans = ('z', 'u', 'v', 'all')
+            chans = ('z', 'u', 'v')
             self.channel = chans[(chans.index(self.channel) + 1) % len(chans)]
         elif k in ('z', 'Z'):
             # 0 means the whole window. The short spans exist to put the
@@ -616,11 +616,11 @@ class TheNextWaveTuiNode(Interface):
 
     def buoy_plot(self, d: dict, width: int, height: int) -> str:
         """
-        Measured vs reconstruction for one buoy, in one channel or all three.
+        Measured vs reconstruction for one buoy, one channel at a time.
 
         z, u and v are rows of the same stacked least-squares problem, so a
-        solve can satisfy one and not the others. Seeing them together shows
-        whether a good heave fit is being bought at the velocity rows' expense.
+        solve can satisfy one and not the others; `c` cycles between them to
+        show whether a good heave fit costs the velocity rows.
         """
         plt.clf()
         plt.plot_size(width, height)
@@ -653,45 +653,41 @@ class TheNextWaveTuiNode(Interface):
               if b < z.size and (self.zoom_sec <= 0.0 or t - t0 >= -self.zoom_sec)]
         span = 'full window' if self.zoom_sec <= 0.0 else f'last {self.zoom_sec:.0f}s'
 
-        channels = (('z', 'm'), ('u', 'm/s'), ('v', 'm/s')) \
-            if self.channel == 'all' else ((self.channel, 'm' if self.channel == 'z'
-                                            else 'm/s'),)
-        if len(channels) > 1:
-            plt.subplots(len(channels), 1)
+        # One channel at a time. plotext's subplot grid is global state that
+        # clf() does not clear, so a multi-pane mode leaks its layout into the
+        # next figure built in the same frame -- the WEC panel ends up drawing
+        # the buoy's rows.
+        ch = self.channel
+        unit = 'm' if ch == 'z' else 'm/s'
+        plt.theme(self.plot_theme)
 
-        for row, (ch, unit) in enumerate(channels):
-            if len(channels) > 1:
-                plt.subplot(row + 1, 1)
-            plt.theme(self.plot_theme)
+        meas, recon = d[f'{ch}_meas'], d[f'{ch}_recon']
+        if meas.ndim != 2 or b >= meas.shape[1]:
+            plt.title(f'{name} {ch}: not published')
+            return plt.build()
 
-            meas, recon = d[f'{ch}_meas'], d[f'{ch}_recon']
-            if meas.ndim != 2 or b >= meas.shape[1]:
-                plt.title(f'{ch}: not published')
-                continue
+        mx, my = tail(tm, meas[:, b])
+        if mx:
+            plt.plot(mx, my, label='measured',
+                     marker=self.plot_marker, color='cyan')
+        if recon.ndim == 2 and b < recon.shape[1]:
+            rx, ry = tail(tr, recon[:, b])
+            if rx:
+                plt.plot(rx, ry, label='reconstruction',
+                         marker=self.plot_marker, color='orange')
 
-            mx, my = tail(tm, meas[:, b])
-            if mx:
-                plt.plot(mx, my, label='measured',
-                         marker=self.plot_marker, color='cyan')
-            if recon.ndim == 2 and b < recon.shape[1]:
-                rx, ry = tail(tr, recon[:, b])
-                if rx:
-                    plt.plot(rx, ry, label='reconstruction',
-                             marker=self.plot_marker, color='orange')
+        title = f'{name} {ch} [{span}]'
+        if ch == 'z' and fc:
+            plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
+                        label=f'forecast +{self.fc_lead_sec:.0f}s',
+                        marker='hd', color='green')
+            title += f'  +{self.fc_lead_sec:.0f}s forecast'
+        elif ch == 'z' and not self.fc_hist:
+            title += '  (overlay needs publish_buoy_predictions)'
 
-            title = f'{name} {ch} [{span}]'
-            if ch == 'z' and fc:
-                plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
-                            label=f'forecast +{self.fc_lead_sec:.0f}s',
-                            marker='hd', color='green')
-                title += f'  +{self.fc_lead_sec:.0f}s forecast'
-            elif ch == 'z' and not self.fc_hist:
-                title += '  (overlay needs publish_buoy_predictions)'
-
-            plt.title(f'{title}  (t - window_end, s)')
-            plt.xlabel('s')
-            plt.ylabel(unit)
-
+        plt.title(f'{title}  (t - window_end, s)')
+        plt.xlabel('s')
+        plt.ylabel(unit)
         return plt.build()
 
     def wec_plot(self, d: dict, width: int, height: int) -> str:
@@ -765,7 +761,7 @@ class TheNextWaveTuiNode(Interface):
         root['buoy'].update(Panel(
             PlotextView(lambda w, h: self.buoy_plot(d, w, h)),
             border_style='cyan',
-            subtitle='n/p buoy   1-9 select   c z|u|v|all   z zoom   q quit',
+            subtitle='n/p buoy   1-9 select   c z|u|v   z zoom   q quit',
             subtitle_align='right',
         ))
         root['wec'].update(Panel(
