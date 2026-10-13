@@ -233,6 +233,7 @@ class TheNextWaveTuiNode(Interface):
         # buoy selection may wrap before any message has been plotted.
         self.n_buoys = 0
         self.quit = False
+        self.zoom_sec = 0.0
 
         self.n_ticks = 0
         self.tick_timer = self.create_timer(
@@ -251,6 +252,13 @@ class TheNextWaveTuiNode(Interface):
             self.buoy_index = (self.buoy_index + 1) % n_b
         elif k in ('p', 'P'):
             self.buoy_index = (self.buoy_index - 1) % n_b
+        elif k in ('z', 'Z'):
+            # 0 means the whole window. The short spans exist to put the
+            # trailing edge on screen: a fit that comes apart in its last few
+            # seconds is invisible across 256 s but is exactly where the
+            # forecast starts.
+            spans = (0.0, 60.0, 30.0, 15.0)
+            self.zoom_sec = spans[(spans.index(self.zoom_sec) + 1) % len(spans)]
         elif k.isdigit() and k != '0':
             i = int(k) - 1
             if i < n_b:
@@ -420,6 +428,37 @@ class TheNextWaveTuiNode(Interface):
                 d['z_wec'] = np.array([], dtype=float)
         return d
 
+    def forecast_stats(self, d: dict, b: int) -> dict:
+        """
+        Recompute forecast skill for one buoy from the published arrays.
+
+        Independent of the solver node's own bookkeeping: each buffered
+        forecast is paired with the measurement interpolated at the instant it
+        was made for. Agreeing with the published forecast_skill means the
+        metric is sound and the forecast is genuinely bad; disagreeing means
+        the metric is. Splitting it into ratio and rho also separates a
+        mis-scaled forecast from a mis-timed one, which the single skill
+        number cannot -- skill = 2*a*rho - a^2 has two roots, so a badly
+        inverted forecast and an over-amplified one give the same value.
+        """
+        empty = fit_stats(np.array([]), np.array([]))
+        t_m = np.asarray(d['t_meas'], dtype=float).reshape((-1,))
+        z_all = d['z_meas']
+        if not self.fc_hist or t_m.size < 2 or z_all.ndim != 2 or b >= z_all.shape[1]:
+            return empty
+
+        n = min(t_m.size, z_all.shape[0])
+        t_m, z_m = t_m[:n], z_all[:n, b]
+        pairs = [(t, z[b]) for t, z in self.fc_hist
+                 if b < z.size and t_m[0] <= t <= t_m[-1]]
+        if len(pairs) < 2:
+            return empty
+
+        ts = np.array([p[0] for p in pairs], dtype=float)
+        fc = np.array([p[1] for p in pairs], dtype=float)
+        obs = np.interp(ts, t_m, z_m)
+        return fit_stats(obs, fc)
+
     def buoy_names(self, d: dict, n: int) -> list[str]:
         names = list(d['labels'])
         while len(names) < n:
@@ -456,14 +495,54 @@ class TheNextWaveTuiNode(Interface):
                 style=colour_for(skill, 0.8, 0.0),
             ),
         )
-        g.add_row(
-            'Hs / Tp / Dp',
-            f"{fmt(float(msg.wavespec_hs), '5.2f')} m   "
-            f"{fmt(float(msg.wavespec_tp), '5.1f')} s   "
-            f"{fmt(float(msg.wavespec_dp), '5.1f')} deg",
-        )
         g.add_row('messages', f"{n_rx}   last {age:.1f} s ago")
         return Panel(g, title='the next wave', border_style='cyan')
+
+    def wavespec_panel(self, msg) -> Panel:
+        """
+        Bulk wavespec driving this window's solve.
+
+        Lp is derived, not published: the deep-water wavelength at Tp. It is
+        here because every spatial phase in the solve is a fraction of it, so
+        it is the scale buoy separations have to be read against.
+        """
+        g = Table.grid(padding=(0, 2))
+        g.add_column(justify='right', style='dim')
+        g.add_column()
+
+        if not msg.has_wavespec_bulk:
+            return Panel(Text('no bulk wavespec in this message', style='dim'),
+                         title='wavespec', border_style='cyan')
+
+        hs = float(msg.wavespec_hs)
+        tp = float(msg.wavespec_tp)
+        freqs = np.asarray(msg.frequencies, dtype=float)
+        dirs = np.asarray(msg.directions, dtype=float)
+
+        g.add_row('Hs', f"{fmt(hs, '5.2f')} m")
+        g.add_row('Tp', f"{fmt(tp, '5.1f')} s")
+        g.add_row(
+            'Tm01 / Tm02',
+            f"{fmt(float(msg.wavespec_tm01), '5.1f')} / "
+            f"{fmt(float(msg.wavespec_tm02), '5.1f')} s",
+        )
+        g.add_row(
+            'Dp / Dm',
+            f"{fmt(float(msg.wavespec_dp), '5.1f')} / "
+            f"{fmt(float(msg.wavespec_dm), '5.1f')} deg True FROM",
+        )
+        g.add_row('spread @ peak', f"{fmt(float(msg.wavespec_spreadp), '5.1f')} deg")
+
+        lp = 9.81 * tp * tp / (2.0 * np.pi) if np.isfinite(tp) and tp > 0 else np.nan
+        g.add_row('Lp (deep)', f"{fmt(lp, '6.1f')} m")
+
+        if freqs.size:
+            g.add_row(
+                'grid',
+                f"{freqs.size} freq x {dirs.size} dir   "
+                f"{freqs.min():.3f}-{freqs.max():.3f} Hz",
+            )
+        return Panel(g, title='wavespec', border_style='cyan')
 
     def stats_panel(self, msg, d: dict) -> Panel:
         z_meas, z_recon = d['z_meas'], d['z_recon']
@@ -483,6 +562,11 @@ class TheNextWaveTuiNode(Interface):
         t.add_column('recon/meas', justify='right')
         t.add_column('rho', justify='right')
         t.add_column('fit skill', justify='right')
+        # Recomputed here from the published arrays, split into amplitude and
+        # phase. skill = 2*a*rho - a^2 is two-to-one, so the published scalar
+        # alone cannot say whether a bad forecast is inverted or over-scaled.
+        t.add_column('f ratio', justify='right')
+        t.add_column('f rho', justify='right')
         t.add_column('fcst skill', justify='right')
 
         have_recon = z_meas.size > 0 and z_recon.size > 0
@@ -491,6 +575,7 @@ class TheNextWaveTuiNode(Interface):
                 s = fit_stats(z_meas[:, b], z_recon[:, b])
             else:
                 s = fit_stats(np.array([]), np.array([]))
+            f = self.forecast_stats(d, b)
             fs = float(by_buoy[b]) if b < by_buoy.size else np.nan
             if b == int(msg.verification_buoy_index):
                 role = 'verify'
@@ -507,6 +592,8 @@ class TheNextWaveTuiNode(Interface):
                 Text(fmt(s['ratio'], '6.3f'), style=colour_for(s['ratio'], 0.9, 0.5)),
                 Text(fmt(s['rho'], '6.3f'), style=colour_for(s['rho'], 0.95, 0.7)),
                 Text(fmt(s['skill'], '6.3f'), style=colour_for(s['skill'], 0.8, 0.0)),
+                Text(fmt(f['ratio'], '6.3f'), style=colour_for(f['ratio'], 0.9, 0.5)),
+                Text(fmt(f['rho'], '6.3f'), style=colour_for(f['rho'], 0.9, 0.5)),
                 Text(fmt(fs, '6.3f'), style=colour_for(fs, 0.8, 0.0)),
             )
 
@@ -536,20 +623,33 @@ class TheNextWaveTuiNode(Interface):
         tm = d['t_meas'] - t0
         tr = (d['t_rec'] - t0) if d['t_rec'].size == d['t_meas'].size else tm
 
-        n = min(tm.size, z_meas.shape[0])
-        plt.plot(list(tm[:n]), list(z_meas[:n, b]),
-                 label='measured', marker=self.plot_marker, color='cyan')
+        # Zoom keeps only the trailing `zoom_sec`, where the forecast begins.
+        def tail(t_rel: np.ndarray, y: np.ndarray) -> tuple[list, list]:
+            n = min(t_rel.size, y.shape[0])
+            t_rel, y = t_rel[:n], y[:n]
+            if self.zoom_sec > 0.0:
+                keep = t_rel >= -self.zoom_sec
+                t_rel, y = t_rel[keep], y[keep]
+            return list(t_rel), list(y)
+
+        tx, ty = tail(tm, z_meas[:, b])
+        if tx:
+            plt.plot(tx, ty, label='measured',
+                     marker=self.plot_marker, color='cyan')
         if b < z_recon.shape[1]:
-            nr = min(tr.size, z_recon.shape[0])
-            plt.plot(list(tr[:nr]), list(z_recon[:nr, b]),
-                     label='reconstruction', marker=self.plot_marker, color='orange')
+            rx, ry = tail(tr, z_recon[:, b])
+            if rx:
+                plt.plot(rx, ry, label='reconstruction',
+                         marker=self.plot_marker, color='orange')
 
         # Past forecasts for this buoy, each plotted at the instant it was made
         # for, against the measurement that has since arrived there. Agreement
         # here is what a positive forecast_skill claims; disagreement while the
         # reconstruction tracks puts the fault in the forecast, not the fit.
-        fc = [(t, z[b]) for t, z in self.fc_hist if b < z.size]
-        title = f'{name}: measured vs reconstruction'
+        fc = [(t, z[b]) for t, z in self.fc_hist
+              if b < z.size and (self.zoom_sec <= 0.0 or t - t0 >= -self.zoom_sec)]
+        span = 'full window' if self.zoom_sec <= 0.0 else f'last {self.zoom_sec:.0f}s'
+        title = f'{name} [{span}]: measured vs reconstruction'
         if fc:
             plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
                         label=f'forecast +{self.fc_lead_sec:.0f}s',
@@ -624,12 +724,17 @@ class TheNextWaveTuiNode(Interface):
             Layout(name='buoy', ratio=1),
             Layout(name='wec', ratio=1),
         )
-        root['head'].update(self.header_panel(msg, d, n_rx, age))
+        root['head'].split_row(
+            Layout(name='status'),
+            Layout(name='spec', size=48),
+        )
+        root['head']['status'].update(self.header_panel(msg, d, n_rx, age))
+        root['head']['spec'].update(self.wavespec_panel(msg))
         root['stats'].update(self.stats_panel(msg, d))
         root['buoy'].update(Panel(
             PlotextView(lambda w, h: self.buoy_plot(d, w, h)),
             border_style='cyan',
-            subtitle='n/p next·prev buoy   1-9 select   q quit',
+            subtitle='n/p next·prev buoy   1-9 select   z zoom   q quit',
             subtitle_align='right',
         ))
         root['wec'].update(Panel(
