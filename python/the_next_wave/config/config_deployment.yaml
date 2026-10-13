@@ -14,8 +14,8 @@
     # Window ends at the newest instant all solve buoys have data for, so a
     # trailing buoy pulls the window back rather than being dropped. This caps
     # how far behind that window may sit before solving is skipped; replayed
-    # backfill is contiguous and valid but can be an hour stale.
-    window_max_lag_sec: 60.0
+    # backfill is contiguous and valid but can be stale.
+    window_max_lag_sec: 10.0
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
 
@@ -28,13 +28,13 @@
     #            count from each buoy, each keeping its own timestamps; the
     #            solver's phase term -t*omega already handles the offsets, so
     #            nothing is dropped and only the sample count has to match.
-    align_mode: nearest
+    align_mode: index
 
     # Conditioning of the velocity rows before the solve (heave untouched).
     #   none:   raw u/v from GpsVel.
     #   matlab: detrend(filtfilt(butter(5, 0.5), u)) -- order 5, cutoff at half
     #           Nyquist (1.25 Hz at 5 Hz), matching filtdat.m + run_LS.
-    solver_input_filter: none
+    solver_input_filter: matlab
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
     rotation_deg: 180.0
     downsample_to_hz: 5.0
@@ -50,9 +50,9 @@
     #   buoy_predictions -> replay; forecast_skill scalars are still published live
     #   wec_series     -> logged elsewhere
     # Turn these back on for any run you intend to export to CSV.
-    publish_measurements: false
-    publish_reconstruction: false
-    publish_buoy_predictions: false
+    publish_measurements: true
+    publish_reconstruction: true
+    publish_buoy_predictions: true
     publish_wec_series: false
 
     # solve swifts feed the inversion; verification swift is held out entirely and used
@@ -65,14 +65,14 @@
     # forecast_skill pools all of them; forecast_skill_by_buoy keeps them
     # separate, and verification_buoy_index points at swift25 -- the only
     # entry whose residual is out of sample.
-    forecast_skill_enable: false
-    forecast_skill_lead_sec: 4.0
+    forecast_skill_enable: true
+    forecast_skill_lead_sec: 1.0
     forecast_skill_window_sec: 140.0
 
     # Least-squares solver tuning
-    lsq_max_iter: 5
+    lsq_max_iter: 60
     lsq_solver_backend: jax  # auto | jax | scipy
-    lsq_diagnostics_enable: false
+    lsq_diagnostics_enable: true
     lsq_near_bound_ratio: 0.95
 
     # Optional MEM stabilization (disabled by default; diverges from MATLAB).
@@ -83,17 +83,17 @@
     # measured from. Leave both out to latch it from the first solve SWIFT's
     # first GPS fix, which moves the frame between runs; set it to compare x/y
     # across runs, and required if any prediction point is given in x/y.
-    # lat_origin: 36.7500
-    # lon_origin: -122.0250
+    lat_origin: 36.77182
+    lon_origin: -121.86564
 
     # Extra forecast locations beside the WEC. Evaluated from the same solved
     # model at the same lead times, so each costs one matvec and no extra solve.
     # Parallel arrays: ROS parameters have no list-of-dict type. Left out
     # entirely rather than set to [], which the ROS yaml parser cannot type.
-    # prediction_points:
-    #   latlon_names: ['mooring', 'shelf_break']
-    #   lats: [36.7512, 36.7604]
-    #   lons: [-122.0261, -122.0388]
+    prediction_points:
+      latlon_names: ['constellation_centroid', 'swift25_centroid']
+      lats: [36.77182, 36.77226]
+      lons: [-121.86564, -121.86638]
     #   xy_names: ['grid_ne']
     #   xs: [250.0]
     #   ys: [250.0]
