@@ -234,6 +234,7 @@ class TheNextWaveTuiNode(Interface):
         self.n_buoys = 0
         self.quit = False
         self.zoom_sec = 0.0
+        self.channel = 'z'
 
         self.n_ticks = 0
         self.tick_timer = self.create_timer(
@@ -252,6 +253,9 @@ class TheNextWaveTuiNode(Interface):
             self.buoy_index = (self.buoy_index + 1) % n_b
         elif k in ('p', 'P'):
             self.buoy_index = (self.buoy_index - 1) % n_b
+        elif k in ('c', 'C'):
+            chans = ('z', 'u', 'v', 'all')
+            self.channel = chans[(chans.index(self.channel) + 1) % len(chans)]
         elif k in ('z', 'Z'):
             # 0 means the whole window. The short spans exist to put the
             # trailing edge on screen: a fit that comes apart in its last few
@@ -392,11 +396,16 @@ class TheNextWaveTuiNode(Interface):
         r = msg.reconstruction
         n_s, n_b = int(m.n_samples), int(m.n_buoys)
 
+        r_s, r_b = int(r.n_samples), int(r.n_buoys)
         d = {
             't_meas': np.asarray(m.time, dtype=float),
             'z_meas': reshape_f(m.z_meas, n_s, n_b),
+            'u_meas': reshape_f(m.u_meas, n_s, n_b),
+            'v_meas': reshape_f(m.v_meas, n_s, n_b),
             't_rec': np.asarray(r.time, dtype=float),
-            'z_recon': reshape_f(r.z_recon, int(r.n_samples), int(r.n_buoys)),
+            'z_recon': reshape_f(r.z_recon, r_s, r_b),
+            'u_recon': reshape_f(r.u_recon, r_s, r_b),
+            'v_recon': reshape_f(r.v_recon, r_s, r_b),
             'labels': [str(s) for s in msg.buoy_prediction_labels],
             'solve_swifts': [str(s) for s in msg.solve_swifts],
             'window_end': float(msg.window_end_time),
@@ -606,13 +615,20 @@ class TheNextWaveTuiNode(Interface):
         return Panel(body, title='fit quality', border_style='cyan')
 
     def buoy_plot(self, d: dict, width: int, height: int) -> str:
+        """
+        Measured vs reconstruction for one buoy, in one channel or all three.
+
+        z, u and v are rows of the same stacked least-squares problem, so a
+        solve can satisfy one and not the others. Seeing them together shows
+        whether a good heave fit is being bought at the velocity rows' expense.
+        """
         plt.clf()
         plt.plot_size(width, height)
-        plt.theme(self.plot_theme)
 
         z_meas, z_recon = d['z_meas'], d['z_recon']
         n_b = z_meas.shape[1] if z_meas.ndim == 2 else 0
         if n_b == 0 or z_recon.size == 0:
+            plt.theme(self.plot_theme)
             plt.title('measured vs reconstruction -- '
                       'enable publish_measurements / publish_reconstruction')
             return plt.build()
@@ -632,35 +648,50 @@ class TheNextWaveTuiNode(Interface):
                 t_rel, y = t_rel[keep], y[keep]
             return list(t_rel), list(y)
 
-        tx, ty = tail(tm, z_meas[:, b])
-        if tx:
-            plt.plot(tx, ty, label='measured',
-                     marker=self.plot_marker, color='cyan')
-        if b < z_recon.shape[1]:
-            rx, ry = tail(tr, z_recon[:, b])
-            if rx:
-                plt.plot(rx, ry, label='reconstruction',
-                         marker=self.plot_marker, color='orange')
-
-        # Past forecasts for this buoy, each plotted at the instant it was made
-        # for, against the measurement that has since arrived there. Agreement
-        # here is what a positive forecast_skill claims; disagreement while the
-        # reconstruction tracks puts the fault in the forecast, not the fit.
+        # Forecasts exist for elevation only; u/v panels get no overlay.
         fc = [(t, z[b]) for t, z in self.fc_hist
               if b < z.size and (self.zoom_sec <= 0.0 or t - t0 >= -self.zoom_sec)]
         span = 'full window' if self.zoom_sec <= 0.0 else f'last {self.zoom_sec:.0f}s'
-        title = f'{name} [{span}]: measured vs reconstruction'
-        if fc:
-            plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
-                        label=f'forecast +{self.fc_lead_sec:.0f}s',
-                        marker='hd', color='green')
-            title += f' vs +{self.fc_lead_sec:.0f}s forecast'
-        elif not self.fc_hist:
-            title += '  (forecast overlay needs publish_buoy_predictions)'
 
-        plt.title(f'{title}  (t - window_end, s)')
-        plt.xlabel('s')
-        plt.ylabel('m')
+        channels = (('z', 'm'), ('u', 'm/s'), ('v', 'm/s')) \
+            if self.channel == 'all' else ((self.channel, 'm' if self.channel == 'z'
+                                            else 'm/s'),)
+        if len(channels) > 1:
+            plt.subplots(len(channels), 1)
+
+        for row, (ch, unit) in enumerate(channels):
+            if len(channels) > 1:
+                plt.subplot(row + 1, 1)
+            plt.theme(self.plot_theme)
+
+            meas, recon = d[f'{ch}_meas'], d[f'{ch}_recon']
+            if meas.ndim != 2 or b >= meas.shape[1]:
+                plt.title(f'{ch}: not published')
+                continue
+
+            mx, my = tail(tm, meas[:, b])
+            if mx:
+                plt.plot(mx, my, label='measured',
+                         marker=self.plot_marker, color='cyan')
+            if recon.ndim == 2 and b < recon.shape[1]:
+                rx, ry = tail(tr, recon[:, b])
+                if rx:
+                    plt.plot(rx, ry, label='reconstruction',
+                             marker=self.plot_marker, color='orange')
+
+            title = f'{name} {ch} [{span}]'
+            if ch == 'z' and fc:
+                plt.scatter([t - t0 for t, _ in fc], [z for _, z in fc],
+                            label=f'forecast +{self.fc_lead_sec:.0f}s',
+                            marker='hd', color='green')
+                title += f'  +{self.fc_lead_sec:.0f}s forecast'
+            elif ch == 'z' and not self.fc_hist:
+                title += '  (overlay needs publish_buoy_predictions)'
+
+            plt.title(f'{title}  (t - window_end, s)')
+            plt.xlabel('s')
+            plt.ylabel(unit)
+
         return plt.build()
 
     def wec_plot(self, d: dict, width: int, height: int) -> str:
@@ -734,7 +765,7 @@ class TheNextWaveTuiNode(Interface):
         root['buoy'].update(Panel(
             PlotextView(lambda w, h: self.buoy_plot(d, w, h)),
             border_style='cyan',
-            subtitle='n/p next·prev buoy   1-9 select   z zoom   q quit',
+            subtitle='n/p buoy   1-9 select   c z|u|v|all   z zoom   q quit',
             subtitle_align='right',
         ))
         root['wec'].update(Panel(
