@@ -26,6 +26,7 @@ from .utilities import (
     build_wavespec_from_swifts,
     bulk_wave_params_from_wavespec,
     centroid_period_and_phase_speed,
+    filter_velocity_matlab,
     format_bulk_wave_params,
     generic_coordinate_transform,
     load_raw_arrays_from_sbg,
@@ -83,6 +84,19 @@ class TheNextWaveConfig:
     # For gz sim (or other sources that already publish z in the desired sign),
     # set this False.
     flip_z_sign: bool = True
+    # How buoy samples are put into one matrix.
+    #   'nearest': intersect buoys onto the first buoy's time grid, dropping any
+    #              instant where a buoy is more than ~half a sample away, then
+    #              give every buoy that shared grid.
+    #   'index':   MATLAB. Take the same trailing sample COUNT from each buoy
+    #              and keep each buoy's own timestamps, which the solver's phase
+    #              term already accounts for. Drops nothing.
+    align_mode: str = 'nearest'
+    # Conditioning applied to the velocity rows before the solve.
+    #   'none':   current Python -- raw u/v straight from GpsVel.
+    #   'matlab': detrend(filtfilt(butter(5, 0.5), u)), heave left untouched,
+    #             matching run_LS_prediction_SWIFTS.m.
+    solver_input_filter: str = 'none'
     n_te: float = 10.0
     # If > 0, reuse the most recently computed usable wavespec until this
     # many seconds of (measurement) time have elapsed, then refresh.
@@ -225,6 +239,12 @@ class TheNextWave:
         zin_all, uin_all, vin_all, tin_all, xin_all, yin_all, fs = \
             self.stack_measurement_data(cleaned_sbg, scored_names)
         n_solve = len(solve_names)
+        # MATLAB conditions the velocity rows (and only those) before the
+        # solve. Applied to the full stack so the published u/v_meas are the
+        # same series the solver saw.
+        if str(self.config.solver_input_filter).lower() == 'matlab':
+            uin_all, vin_all = filter_velocity_matlab(uin_all, vin_all)
+
         zin = zin_all[:, :n_solve]
         uin = uin_all[:, :n_solve]
         vin = vin_all[:, :n_solve]
@@ -782,6 +802,7 @@ class TheNextWave:
             self.lon_origin,
             self.config.rotation_deg,
             flip_z_sign=bool(self.config.flip_z_sign),
+            align_mode=str(self.config.align_mode),
         )
 
     def build_averaged_wavespec(

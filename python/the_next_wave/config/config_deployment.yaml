@@ -18,6 +18,23 @@
     window_max_lag_sec: 60.0
     # Raw SBG heave on real SWIFT is upside-down; apply correction.
     flip_z_sign: true
+
+    # How buoy samples are combined into the solver matrix.
+    #   nearest: intersect every buoy onto the first buoy's time grid, keeping
+    #            only instants where all buoys agree within ~half a sample, and
+    #            give every buoy that shared grid. Live SBG clocks disagree by
+    #            more than that, so this can discard most of the window.
+    #   index:   MATLAB (run_LS_prediction_SWIFTS.m). Same trailing sample
+    #            count from each buoy, each keeping its own timestamps; the
+    #            solver's phase term -t*omega already handles the offsets, so
+    #            nothing is dropped and only the sample count has to match.
+    align_mode: nearest
+
+    # Conditioning of the velocity rows before the solve (heave untouched).
+    #   none:   raw u/v from GpsVel.
+    #   matlab: detrend(filtfilt(butter(5, 0.5), u)) -- order 5, cutoff at half
+    #           Nyquist (1.25 Hz at 5 Hz), matching filtdat.m + run_LS.
+    solver_input_filter: none
     # Matches MATLAB GenericCoordinateTransform convention (rotation=180 → x=+East, y=+North).
     rotation_deg: 180.0
     downsample_to_hz: 5.0

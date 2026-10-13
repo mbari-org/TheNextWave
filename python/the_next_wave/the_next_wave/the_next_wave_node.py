@@ -60,6 +60,10 @@ class TheNextWaveNodeParams:
     # preserve the existing convention.
     origin_at_target: bool = False
     flip_z_sign: bool = True
+    # 'nearest' (current Python) | 'index' (MATLAB)
+    align_mode: str = 'nearest'
+    # 'none' (current Python) | 'matlab'
+    solver_input_filter: str = 'none'
     n_te: float = 10.0
 
     downsample_to_hz: float = 0.0
@@ -301,6 +305,8 @@ class TheNextWaveNode(Interface):
                 rotation_deg=self.params.rotation_deg,
                 origin_at_target=self.params.origin_at_target,
                 flip_z_sign=self.params.flip_z_sign,
+                align_mode=self.params.align_mode,
+                solver_input_filter=self.params.solver_input_filter,
                 n_te=self.params.n_te,
                 wavespec_update_period_sec=self.params.wavespec_update_period_sec,
                 dense_prediction_window=self.params.dense_prediction_window,
@@ -1669,6 +1675,8 @@ class TheNextWaveNode(Interface):
         # Real SWIFT SBG heave is upside-down and needs a sign flip.
         # In gz sim, z is typically already up-positive, so set False.
         self.declare_parameter('flip_z_sign', defaults.flip_z_sign)
+        self.declare_parameter('align_mode', defaults.align_mode)
+        self.declare_parameter('solver_input_filter', defaults.solver_input_filter)
 
         # If > 0, recompute the averaged directional spectrum only at this interval
         # (in measurement time), reusing the last valid wavespec in between.
@@ -1833,6 +1841,22 @@ class TheNextWaveNode(Interface):
         params.rotation_deg = float(self.get_parameter('rotation_deg').value)
         params.origin_at_target = bool(self.get_parameter('origin_at_target').value)
         params.flip_z_sign = bool(self.get_parameter('flip_z_sign').value)
+
+        align = str(self.get_parameter('align_mode').value).strip().lower()
+        if align not in {'nearest', 'index'}:
+            self.get_logger().warn(
+                f"Unknown align_mode='{align}', falling back to 'nearest'"
+            )
+            align = 'nearest'
+        params.align_mode = align
+
+        sfilt = str(self.get_parameter('solver_input_filter').value).strip().lower()
+        if sfilt not in {'none', 'matlab'}:
+            self.get_logger().warn(
+                f"Unknown solver_input_filter='{sfilt}', falling back to 'none'"
+            )
+            sfilt = 'none'
+        params.solver_input_filter = sfilt
         params.wavespec_update_period_sec = float(
             self.get_parameter('wavespec_update_period_sec').value
         )

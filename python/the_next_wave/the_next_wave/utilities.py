@@ -26,6 +26,7 @@ Reusable functions extracted from example.py for use in the_next_wave_node.py an
 """
 
 import numpy as np
+from scipy import signal
 
 from .swift import WaveSpec
 from .SWIFTdirectionalspectra import SWIFTdirectionalspectra
@@ -683,7 +684,35 @@ def format_bulk_wave_params(params: dict, label: str = '') -> str:
     return prefix + ', '.join(parts)
 
 
-def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
+def filter_velocity_matlab(u, v, order: int = 5, cutoff: float = 0.5):
+    """
+    Condition solver velocity inputs the way the MATLAB driver does.
+
+    `run_LS_prediction_SWIFTS.m` passes velocities through
+    ``detrend(filtdat(u, 5, 1/2, 'low'))`` and leaves heave untouched.
+    `filtdat` is ``butter(order, cutoff, type)`` + ``filtfilt``, and MATLAB's
+    butter normalises cutoff to Nyquist -- so 1/2 is half Nyquist, 1.25 Hz at
+    5 Hz sampling, not 0.5 Hz. scipy normalises the same way when `fs` is not
+    given, so the coefficients match. Filter first, then detrend, in that
+    order. padlen is set to MATLAB's 3*(nfilt-1) rather than scipy's default.
+    """
+    b, a = signal.butter(int(order), float(cutoff), btype='low')
+    padlen = 3 * (max(len(a), len(b)) - 1)
+
+    def one(arr):
+        arr = np.asarray(arr, dtype=float)
+        if arr.ndim != 2 or arr.shape[0] <= padlen:
+            return arr
+        return signal.detrend(
+            signal.filtfilt(b, a, arr, axis=0, padlen=padlen),
+            axis=0, type='linear',
+        )
+
+    return one(u), one(v)
+
+
+def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True,
+                             align_mode: str = 'nearest'):
     """
     Extract and stack raw SBG data from multiple buoys.
 
@@ -827,6 +856,39 @@ def load_raw_arrays_from_sbg(sbgs, *args, flip_z_sign: bool = True):
 
     if not per_buoy:
         raise ValueError('No usable samples in SBG inputs')
+
+    if str(align_mode).lower() == 'index':
+        # MATLAB behaviour (run_LS_prediction_SWIFTS.m): one index range is
+        # applied to every buoy and each buoy keeps its OWN timestamps, which
+        # then go into phi = x*kx + y*ky - t*omega per element. A clock offset
+        # between buoys produces the correct phase for that buoy instead of
+        # having to be matched away, so no sample is ever discarded. Only the
+        # sample COUNT has to agree, not the instants, so take the trailing
+        # n_keep of each buoy -- the realtime equivalent of MATLAB's
+        # `subsample` range into an already-aligned burst.
+        n_keep = min(int(np.asarray(b['t']).size) for b in per_buoy)
+        if n_keep < 2:
+            raise ValueError('Not enough samples for index alignment')
+        for b in per_buoy:
+            n_b = int(np.asarray(b['t']).size)
+            sl = slice(n_b - n_keep, n_b)
+            zin.append(np.asarray(b['z'], dtype=float)[sl])
+            uin.append(np.asarray(b['u'], dtype=float)[sl])
+            vin.append(np.asarray(b['v'], dtype=float)[sl])
+            xin.append(np.asarray(b['x'], dtype=float)[sl])
+            yin.append(np.asarray(b['y'], dtype=float)[sl])
+            tin.append(np.asarray(b['t'], dtype=float)[sl])
+
+        zin = np.column_stack(zin)
+        uin = np.column_stack(uin)
+        vin = np.column_stack(vin)
+        tin = np.column_stack(tin)
+        xin = np.column_stack(xin)
+        yin = np.column_stack(yin)
+        if bool(flip_z_sign):
+            zin = -zin
+        fs = 1.0 / float(np.nanmean(np.diff(tin, axis=0)))
+        return zin, uin, vin, tin, xin, yin, fs
 
     # Choose a reference time grid. In the main pipeline sbgs are ordered (swift22..)
     # so using the first buoy provides stable behavior across runs.
